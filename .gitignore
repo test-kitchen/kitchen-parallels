@@ -1,0 +1,8 @@
+/.bundle/
+/Gemfile.lock
+/.kitchen/
+*.gem
+**/.kitchen/
+**/kitchen.local.yml
+**/.kitchen.local.yml
+**/Policyfile.lock.json
