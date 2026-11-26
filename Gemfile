@@ -3,7 +3,7 @@ source "https://rubygems.org"
 if ENV["TEST_KITCHEN_PATH"]
   gem "test-kitchen", path: ENV.fetch("TEST_KITCHEN_PATH")
 else
-  gem "test-kitchen", github: "test-kitchen/test-kitchen", ref: "e60bb7eeed6abe214c647adbc4f10b90b1824d2c"
+  gem "test-kitchen", github: "test-kitchen/test-kitchen", ref: "891904408ce03df546120e6b67e4e7888ecd432e"
 end
 
 gemspec development_group: :test
