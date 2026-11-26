@@ -5,7 +5,7 @@ Run Test Kitchen against disposable Linux VMs on Parallels Desktop. The driver u
 
 ## Requirements
 
-- Ruby 3.1 or newer and Test Kitchen with the shared box cache API.
+- Ruby 3.1 or newer and Test Kitchen 4.2 or newer.
 - Parallels Desktop with full CLI access in the current macOS user session.
 - A prepared Linux guest for the Mac's CPU architecture, with Parallels Tools,
   shared networking, SSH and an account suitable for your provisioner.
@@ -17,13 +17,12 @@ using the NIC's MAC address or another unique DHCP client ID.
 
 ## Install from this checkout
 
-Run `bundle install` in this checkout. The Gemfile pins a Test Kitchen
-revision that includes the shared box cache and installs the provisioners
-for the Apache smoke tests. Set `TEST_KITCHEN_PATH` to use a compatible local
-Test Kitchen checkout.
+Run `bundle install` in this checkout to install Test Kitchen and the
+provisioners for the Apache smoke tests. Set `TEST_KITCHEN_PATH` to use a
+compatible local Test Kitchen checkout.
 
-To use this driver from another project, add `kitchen-parallels` and a
-compatible Test Kitchen revision to that project's Gemfile.
+To use this driver from another project, add `kitchen-parallels` to its
+Gemfile. Bundler installs a compatible Test Kitchen version.
 
 ## Use a box from disk or a mounted NAS
 
