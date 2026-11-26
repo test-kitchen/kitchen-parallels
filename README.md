@@ -18,8 +18,8 @@ using the NIC's MAC address or another unique DHCP client ID.
 ## Install from this checkout
 
 Run `bundle install` in this checkout. The Gemfile pins a Test Kitchen
-revision that includes the shared box cache and installs `kitchen-cinc`
-for the Apache example. Set `TEST_KITCHEN_PATH` to use a compatible local
+revision that includes the shared box cache and installs the provisioners
+for the Apache smoke tests. Set `TEST_KITCHEN_PATH` to use a compatible local
 Test Kitchen checkout.
 
 To use this driver from another project, add `kitchen-parallels` and a
@@ -148,18 +148,23 @@ after registration, retry it after fixing the cause or run `kitchen destroy`
 to remove the failed instance and its local copy. Destroy the instance before
 switching its source image or removing its `.kitchen` state.
 
-## Apache example with Cinc
+## Apache smoke tests
 
-Install Cinc Workstation so `cinc-cli` is on `PATH`. From this repository,
-run:
+Mount the NAS or set `KITCHEN_BOX_MANIFEST` to a manifest containing the
+pinned Bento Ubuntu 24.04 box for your platform. Alternatively, set
+`KITCHEN_PARALLELS_UBUNTU_BOX` to a local box archive. Install Cinc Workstation
+with `cinc-cli` on `PATH` for the Cinc suite.
+
+Run these commands from the driver checkout:
 
 ```sh
 bundle install
-bundle exec ruby examples/apache2/run.rb test --destroy always
+bundle exec ruby examples/apache2/run.rb test cinc --destroy always
+bundle exec ruby examples/apache2/run.rb test puppet --destroy always
+bundle exec ruby examples/apache2/run.rb test ansible --destroy always
 ```
 
-The example installs Apache with `cinc_infra`, checks that a second converge
-makes no changes, and verifies that Apache is enabled, running and serving
-HTTP 200 in the guest. It selects the pinned Ubuntu 24.04 release through the
-NAS manifest. Set `KITCHEN_BOX_MANIFEST` to use another manifest, or
-`KITCHEN_PARALLELS_UBUNTU_BOX` to override the Parallels archive directly.
+Each suite creates its own VM, provisions Apache, verifies the service is
+enabled and returns HTTP 200, and destroys the VM. Cinc and Ansible also
+check that a second apply makes no changes. Puppet and Ansible install their
+runtimes from the Ubuntu package repositories before applying the examples.

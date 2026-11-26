@@ -3,13 +3,6 @@ driver:
   name: parallels
   box_manifest: <%= ENV.fetch("KITCHEN_BOX_MANIFEST", "/Volumes/nfs/bentox_boxes/manifest.json").inspect %>
 
-provisioner:
-  name: cinc_infra
-  product_name: cinc
-  install_strategy: once
-  multiple_converge: 2
-  enforce_idempotency: true
-
 verifier:
   name: shell
   remote_exec: true
@@ -31,5 +24,41 @@ platforms:
         name: bento/ubuntu-24.04
         version: "202510.26.0"
       <% end %>
+
 suites:
-  - name: apache2
+  - name: cinc
+    provisioner:
+      name: cinc_infra
+      product_name: cinc
+      install_strategy: once
+      multiple_converge: 2
+      enforce_idempotency: true
+  - name: puppet
+    lifecycle:
+      pre_converge:
+        - remote: >-
+            sudo apt-get update -qq &&
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq puppet-agent
+    provisioner:
+      name: puppet_apply
+      manifests_path: manifests
+      manifest: site.pp
+      modules_path: modules
+      require_puppet_collections: false
+      require_puppet_repo: false
+      require_chef_for_busser: false
+      resolve_with_librarian_puppet: false
+  - name: ansible
+    lifecycle:
+      pre_converge:
+        - remote: >-
+            sudo apt-get update -qq &&
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ansible-core
+    provisioner:
+      name: ansible_playbook
+      hosts: localhost
+      playbook: default.yml
+      require_ansible_repo: false
+      require_chef_for_busser: false
+      show_command_output: true
+      idempotency_test: true

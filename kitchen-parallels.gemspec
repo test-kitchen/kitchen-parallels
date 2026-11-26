@@ -1,9 +1,11 @@
 # Copyright 2026 Dan Webb
 # SPDX-License-Identifier: Apache-2.0
 
+require_relative "lib/kitchen/driver/parallels_version"
+
 Gem::Specification.new do |gem|
   gem.name = "kitchen-parallels"
-  gem.version = "0.1.0"
+  gem.version = Kitchen::Driver::PARALLELS_VERSION
   gem.authors = ["Dan Webb"]
   gem.email = ["dan.webb@damacus.io"]
   gem.summary = "Test Kitchen driver for Parallels Desktop"
