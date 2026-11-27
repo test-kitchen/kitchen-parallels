@@ -12,6 +12,7 @@ require "kitchen/state_file"
 require "mixlib/shellout" unless defined?(Mixlib::ShellOut)
 require "securerandom" unless defined?(SecureRandom)
 require "shellwords" unless defined?(Shellwords)
+require "time" unless defined?(Time.zone_offset)
 require "tmpdir" unless defined?(Dir.mktmpdir)
 require_relative "parallels/access"
 require_relative "parallels/volumes"
@@ -68,7 +69,71 @@ module Kitchen
         release_box_source(state)
       end
 
+      def status(state)
+        id = state[:parallels_uuid]
+        unless id || state[:parallels_name]
+          return status_report(false, "not_created", "No managed VM is recorded for this instance")
+        end
+
+        vm = find_vm(state)
+        unless vm
+          return status_report(false, "not_created", "Parallels has no matching managed VM", id)
+        end
+
+        id = vm.fetch("uuid")
+        vm_state = vm.fetch("status") { raise ActionFailed, "prlctl did not report status for #{id}" }
+        status_report(vm_state == "running", vm_state, "Parallels reports the VM as #{vm_state}", id)
+      rescue ActionFailed => e
+        status_report(nil, "unknown", e.message, id)
+      end
+
+      def doctor(_state)
+        checks = [-> { vm_list }, method(:validate_config), method(:volume_configuration), method(:validate_source)]
+        problems = checks.filter_map do |check|
+          check.call
+          nil
+        rescue ActionFailed, UserError => e
+          e.message
+        end
+        problems.each { |problem| warn(problem) }
+        !problems.empty?
+      end
+
       private
+
+      def status_report(live, state, message, id = nil)
+        { live: live, state: state, source: "driver", resource_id: id,
+          message: message, checked_at: Time.now.utc.iso8601 }
+      end
+
+      def validate_box
+        box = config[:box]
+        if box.is_a?(Hash)
+          manifest = config[:box_manifest] || ENV[Box::Catalog::ENV_KEY]
+          manifest = File.expand_path(manifest, config[:kitchen_root]) unless manifest.to_s.empty?
+          catalog = Box::Catalog.new(manifest)
+          entry = catalog.find(name: box[:name], version: box[:version], provider: "parallels")
+          catalog.verify(entry)
+        else
+          path = File.expand_path(box.to_s, config[:kitchen_root])
+          validate_box_path(path)
+        end
+      end
+
+      def validate_box_path(path)
+        return if (File.directory?(path) && File.extname(path) == ".pvm" ||
+          File.file?(path) && File.extname(path) == ".box") && File.readable?(path)
+
+        raise ActionFailed, "driver.box must point to a readable local Parallels .pvm bundle or .box archive: #{path}"
+      end
+
+      def validate_source
+        if config[:source_vm]
+          find_source_vm
+        elsif config[:box]
+          validate_box
+        end
+      end
 
       def validate_config
         unless config[:source_vm].nil? ^ config[:box].nil?
@@ -121,6 +186,11 @@ module Kitchen
       end
 
       def clone_source(state)
+        vm = find_source_vm
+        prlctl("clone", vm.fetch("uuid"), "--name", state[:parallels_name])
+      end
+
+      def find_source_vm
         source = config[:source_vm]
         vm = vm_list.find { |entry| entry.fetch("uuid") == source || entry.fetch("name") == source }
         raise ActionFailed, "Parallels source VM #{source.inspect} was not found" unless vm
@@ -128,15 +198,12 @@ module Kitchen
           raise ActionFailed, "Shut down the Parallels source VM #{source.inspect} before cloning it"
         end
 
-        prlctl("clone", vm.fetch("uuid"), "--name", state[:parallels_name])
+        vm
       end
 
       def import_box(state)
         source = box_source("parallels", state) { checkpoint(state) }
-        unless File.directory?(source) && File.extname(source) == ".pvm" ||
-            File.file?(source) && File.extname(source) == ".box"
-          raise ActionFailed, "driver.box must point to a local Parallels .pvm bundle or .box archive: #{source}"
-        end
+        validate_box_path(source)
 
         remove_instance_directory(state)
         directory = import_directory(state)
