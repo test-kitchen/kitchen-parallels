@@ -8,6 +8,47 @@ module Kitchen
 
       private
 
+      def winrm_loopback_host(volumes)
+        host = instance.transport[:hostname] || "127.0.0.1"
+        unless ["127.0.0.1", "::1"].include?(host)
+          raise ActionFailed, "Parallels WinRM requires transport.hostname to be a loopback address (127.0.0.1 or ::1)"
+        end
+        unless volumes[:folders].empty?
+          raise ActionFailed, "Parallels synced folders are unavailable with WinRM"
+        end
+
+        host
+      end
+
+      def wait_for_winrm(state)
+        uuid = state.fetch(:parallels_uuid)
+        # Create a fresh marker directly in this clone through Parallels Tools.
+        marker = %{Join-Path $env:ProgramData "kitchen-winrm-#{SecureRandom.uuid}"}
+        windows_guest_command(uuid, "New-Item -ItemType File -Path (#{marker}) -ErrorAction Stop | Out-Null")
+        begin
+          connection = instance.transport.connection(state)
+          connection.wait_until_ready
+          connection.execute("if (-not (Test-Path -LiteralPath (#{marker}) -PathType Leaf)) { exit 42 }")
+        rescue Transport::WinrmFailed => e
+          raise unless e.exit_code == 42
+
+          raise ActionFailed, "The WinRM tunnel did not reach Parallels clone #{uuid}. Reconnect it to this clone and retry kitchen create."
+        ensure
+          remove_winrm_marker(uuid, marker)
+        end
+      end
+
+      def remove_winrm_marker(uuid, marker)
+        windows_guest_command(uuid, "Remove-Item -LiteralPath (#{marker}) -ErrorAction Stop")
+      rescue ActionFailed => e
+        debug("Could not remove the WinRM readiness marker from Parallels clone #{uuid}: #{e.message}")
+      end
+
+      def windows_guest_command(uuid, script)
+        encoded = [script.encode("UTF-16LE")].pack("m0")
+        execute_guest_command(uuid, "powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded)
+      end
+
       def refuse_package_with_injected_key(state)
         key = File.join(import_directory(state), "ssh_key")
         persisted = StateFile.new(config[:kitchen_root], instance.name).read
@@ -66,14 +107,22 @@ module Kitchen
       end
 
       def guest_command(uuid, *arguments, readiness_deadline: nil)
+        if readiness_deadline
+          return execute_guest_command(uuid, readiness_deadline: readiness_deadline) { |remaining| Shellwords.join(yield(remaining)) }
+        end
+
+        execute_guest_command(uuid, Shellwords.join(arguments))
+      end
+
+      def execute_guest_command(uuid, *arguments, readiness_deadline: nil)
         deadline = readiness_deadline || Process.clock_gettime(Process::CLOCK_MONOTONIC) + 30
         begin
           if readiness_deadline
             remaining = static_readiness_remaining(deadline)
-            return prlctl("exec", uuid, Shellwords.join(yield(remaining)), timeout: remaining)
+            return prlctl("exec", uuid, yield(remaining), timeout: remaining)
           end
 
-          prlctl("exec", uuid, Shellwords.join(arguments))
+          prlctl("exec", uuid, *arguments)
         rescue ActionFailed => e
           raise unless e.message.include?("Unable to open new session in this virtual machine") &&
             Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline

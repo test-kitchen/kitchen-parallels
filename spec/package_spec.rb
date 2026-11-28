@@ -145,7 +145,8 @@ describe "kitchen-parallels package" do
       source = File.join(root, "base.box")
       File.write(source, "unexpected archive bytes")
       driver = Kitchen::Driver::Parallels.new(kitchen_root: root, box: source, package_source_sha256: "a" * 64)
-      driver.finalize_config!(Struct.new(:name, :logger).new("default-ubuntu", Logger.new(File::NULL)))
+      instance = Struct.new(:name, :logger, :transport).new("default-ubuntu", Logger.new(File::NULL), { name: "ssh" })
+      driver.finalize_config!(instance)
       inventory = ["list", "--all", "--full", "--output", "uuid,status,ip_configured,mac,name", "--json"]
       cli = lambda do |*args|
         assert_equal inventory, args

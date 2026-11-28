@@ -203,7 +203,7 @@ describe Kitchen::Driver::Parallels do
   def with_network_driver(network, **options)
     Dir.mktmpdir do |root|
       driver = Kitchen::Driver::Parallels.new(box: "fixture.box", insert_key: false, kitchen_root: root, **options)
-      transport = Object.new
+      transport = { name: "ssh" }
       def transport.connection(_state)
         self
       end

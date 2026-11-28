@@ -21,7 +21,7 @@ require_relative "parallels/network"
 
 module Kitchen
   module Driver
-    # Creates disposable Linux VMs using the local Parallels Desktop CLI.
+    # Creates disposable VMs using the local Parallels Desktop CLI.
     class Parallels < Base
       kitchen_driver_api_version 2
       plugin_version "0.1.0"
@@ -56,6 +56,12 @@ module Kitchen
         validate_config
         volumes = volume_configuration
         network = network_configuration
+        winrm = instance.transport[:name].to_s == "winrm"
+        if winrm && (network[:static_ip] || network[:forward] || network[:mode] == "bridged")
+          raise ActionFailed, "Parallels WinRM supports inherited, shared or host-only networking without driver.static_ip or driver.port_forward"
+        end
+
+        winrm_host = winrm_loopback_host(volumes) if winrm
         prepare_state(state, network)
         vm = find_vm(state)
         unless vm
@@ -66,9 +72,15 @@ module Kitchen
         checkpoint(state)
         start_vm(vm, volumes, imported: state[:parallels_import], first_boot: state[:parallels_first_boot], network: network)
         checkpoint(state) if state.delete(:parallels_first_boot)
-        state[:hostname] = wait_for_ip(state[:parallels_uuid], network: network)
-        configure_ssh(state)
-        instance.transport.connection(state).wait_until_ready
+        guest_ip = wait_for_ip(state[:parallels_uuid], network: network)
+        state[:hostname] = winrm_host || guest_ip
+        if winrm
+          info("WinRM expects a loopback tunnel at #{winrm_host}:#{instance.transport[:port]} for Parallels guest #{guest_ip}")
+          wait_for_winrm(state)
+        else
+          configure_ssh(state)
+          instance.transport.connection(state).wait_until_ready
+        end
         mount_shared_folders(state[:parallels_uuid], volumes[:folders])
         install_port_forward(state) if network[:forward]
       end
