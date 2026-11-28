@@ -34,7 +34,7 @@ module Kitchen
       default_config :synced_folders, []
       default_config :additional_disks, []
 
-      UUID = /\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z/i.freeze
+      UUID = /\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z/i
 
       include ParallelsAccess
       include ParallelsVolumes
@@ -77,39 +77,82 @@ module Kitchen
         state_file = StateFile.new(config[:kitchen_root], instance.name)
         state = state_file.read
         uuid = state[:parallels_uuid]
-        token = state[:parallels_token]
-        managed_name = managed_vm_name(token)
-        vm = find_vm(state) if UUID.match?(uuid.to_s) && UUID.match?(token.to_s) && state[:parallels_name] == managed_name
-        unless vm && vm.fetch("name") == managed_name
-          raise ActionFailed, "No managed Parallels VM found for #{instance.name}"
-        end
+        require_stopped_restore_vm(state)
 
-        snapshots = read_json(prlctl("snapshot-list", uuid, "--json"), "prlctl snapshot-list")
+        snapshots = snapshot_inventory(uuid)
         snapshot_key = snapshots.keys.find { |key| key.casecmp?("{#{snapshot_id}}") }
         raise ActionFailed, "Parallels snapshot #{snapshot_id} was not found for #{instance.name}" unless snapshot_key
-
-        unless vm.fetch("status") == "stopped" && snapshots.fetch(snapshot_key).fetch("state") == "poweroff"
+        unless snapshots.fetch(snapshot_key)["state"] == "poweroff"
           raise ActionFailed, "Restore requires a powered-off snapshot and a shut down VM"
         end
 
-        state.delete(:last_action)
-        state.delete(:hostname)
-        Dir.mktmpdir("parallels-restore-", File.dirname(state_file.path)) do |directory|
-          pending_state = StateFile.new(directory, instance.name)
-          pending_state.write(state)
-          File.chmod(File.stat(state_file.path).mode & 0o777, pending_state.path)
-          prlctl("snapshot-switch", uuid, "--id", snapshot_key, "--skip-resume")
-          begin
-            File.rename(pending_state.path, state_file.path)
-          rescue SystemCallError => e
-            raise ActionFailed, "Restored #{instance.name}, but could not reset Kitchen state: #{e.message}. Retry restore before running kitchen create."
-          end
-        end
+        reset_restore_state(state_file, state) { switch_snapshot(state, snapshot_key) }
       rescue SystemCallError, IOError => e
         raise ActionFailed, "Could not complete restore for #{instance.name}: #{e.message}"
       end
 
       private
+
+      def require_stopped_restore_vm(state)
+        uuid = state[:parallels_uuid]
+        token = state[:parallels_token]
+        managed_name = managed_vm_name(token)
+        vm = find_vm(state) if UUID.match?(uuid.to_s) && UUID.match?(token.to_s) && state[:parallels_name] == managed_name
+        unless vm && vm["name"] == managed_name
+          raise ActionFailed, "No managed Parallels VM found for #{instance.name}"
+        end
+        unless vm["status"] == "stopped"
+          raise ActionFailed, "Restore requires a powered-off snapshot and a shut down VM"
+        end
+      end
+
+      def snapshot_inventory(uuid)
+        output = prlctl("snapshot-list", uuid, "--json")
+        return {} if output.strip.empty?
+
+        snapshots = read_json(output, "prlctl snapshot-list")
+        unless snapshots.is_a?(Hash) && snapshots.all? { |key, entry| valid_snapshot_entry?(key, entry) } &&
+            snapshots.values.count { |entry| entry["current"] } <= 1
+          raise ActionFailed, "Invalid snapshot inventory from prlctl snapshot-list"
+        end
+
+        snapshots
+      end
+
+      def valid_snapshot_entry?(key, entry)
+        key.start_with?("{") && key.end_with?("}") && UUID.match?(key[1...-1]) &&
+          entry.is_a?(Hash) && entry["state"].is_a?(String) && !entry["state"].strip.empty? &&
+          [true, false].include?(entry.fetch("current", false))
+      end
+
+      def reset_restore_state(state_file, state)
+        Dir.mktmpdir("parallels-restore-", File.dirname(state_file.path)) do |directory|
+          pending_state = StateFile.new(directory, instance.name)
+          pending_state.write(state.except(:last_action, :hostname))
+          File.chmod(File.stat(state_file.path).mode & 0o777, pending_state.path)
+          unless state_file.read == state
+            raise ActionFailed, "Kitchen state changed during restore for #{instance.name}"
+          end
+
+          require_stopped_restore_vm(state)
+          # Publish the reset before the switch so an interrupted restore cannot leave a stale address or stage.
+          File.rename(pending_state.path, state_file.path)
+          yield
+        end
+      end
+
+      def switch_snapshot(state, snapshot_key)
+        uuid = state.fetch(:parallels_uuid)
+        prlctl("snapshot-switch", uuid, "--id", snapshot_key, "--skip-resume")
+        current_key = snapshot_inventory(uuid).find { |_, entry| entry["current"] }&.first
+        unless current_key&.casecmp?(snapshot_key)
+          raise ActionFailed, "Snapshot #{snapshot_key} is not current"
+        end
+
+        require_stopped_restore_vm(state)
+      rescue ActionFailed => e
+        raise ActionFailed, "Could not confirm snapshot restore for #{instance.name}: #{e.message}"
+      end
 
       def managed_vm_name(token)
         "kitchen-#{instance.name}-#{token}"

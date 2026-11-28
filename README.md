@@ -124,11 +124,15 @@ the guest was running are outside this workflow.
 
 Restoring rolls the guest disks and VM settings back to the selected snapshot.
 Host files in shared folders retain their current contents. Kitchen checks the
-inventory before switching snapshots or writing instance state. After a restore
-the VM stays stopped and Kitchen clears its recorded lifecycle stage and
-address. `kitchen create` starts the same VM and refreshes access before you
-use `kitchen exec` or converge again. Keep the Kitchen state and any generated
-SSH key until you destroy the instance.
+snapshot inventory and rechecks VM ownership and power state before switching.
+It clears the recorded lifecycle stage and address before attempting the switch,
+so a failed or interrupted attempt may also leave those values cleared. A
+successful restore confirms that the selected snapshot is current and the VM
+is stopped. If the result is uncertain, check the snapshot inventory and VM
+status before continuing. Once the restore is confirmed, `kitchen create`
+starts the same VM and refreshes access before you use `kitchen exec` or
+converge again. Keep the Kitchen state and any generated SSH key until you
+destroy the instance.
 
 ## Rsync uploads
 
