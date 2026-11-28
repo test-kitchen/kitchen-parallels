@@ -147,6 +147,14 @@ after registration, retry it after fixing the cause or run `kitchen destroy`
 to remove the failed instance and its local copy. Destroy the instance before
 switching its source image or removing its `.kitchen` state.
 
+## Status and diagnostics
+
+Run `kitchen list --live` to see the state reported by Parallels for each
+managed VM. Add `--probe` to check transport connectivity as well.
+Run `kitchen doctor` to check host access and the configured VM source before
+creating an instance. These checks read the provider and local configuration
+without starting or modifying VMs.
+
 ## Apache smoke tests
 
 Mount the NAS or set `KITCHEN_BOX_MANIFEST` to a manifest containing the
