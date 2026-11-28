@@ -17,6 +17,7 @@ require "tmpdir" unless defined?(Dir.mktmpdir)
 require_relative "parallels/access"
 require_relative "parallels/package"
 require_relative "parallels/volumes"
+require_relative "parallels/network"
 
 module Kitchen
   module Driver
@@ -39,8 +40,13 @@ module Kitchen
       default_config :synced_folders, []
       default_config :additional_disks, []
 
+      default_config :network_mode
+      default_config :static_ip
+      default_config :port_forward
+
       UUID = /\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z/i
 
+      include ParallelsNetwork
       include ParallelsAccess
       include ParallelsPackage
       include ParallelsVolumes
@@ -49,21 +55,28 @@ module Kitchen
       def create(state)
         validate_config
         volumes = volume_configuration
-        prepare_state(state)
-        vm = find_vm(state) || create_vm(state)
+        network = network_configuration
+        prepare_state(state, network)
+        vm = find_vm(state)
+        unless vm
+          remove_port_forward(state)
+          vm = create_vm(state)
+        end
         state[:parallels_uuid] = vm.fetch("uuid")
         checkpoint(state)
-        start_vm(vm, volumes, imported: state[:parallels_import], first_boot: state[:parallels_first_boot])
+        start_vm(vm, volumes, imported: state[:parallels_import], first_boot: state[:parallels_first_boot], network: network)
         checkpoint(state) if state.delete(:parallels_first_boot)
-        state[:hostname] = wait_for_ip(state[:parallels_uuid])
+        state[:hostname] = wait_for_ip(state[:parallels_uuid], network: network)
         configure_ssh(state)
         instance.transport.connection(state).wait_until_ready
         mount_shared_folders(state[:parallels_uuid], volumes[:folders])
+        install_port_forward(state) if network[:forward]
       end
 
       def destroy(state)
         return unless state[:parallels_token]
 
+        remove_port_forward(state)
         vm = find_vm(state)
         if vm
           uuid = vm.fetch("uuid")
@@ -251,17 +264,25 @@ module Kitchen
         end
       end
 
-      def prepare_state(state)
+      def prepare_state(state, network)
         importing = !config[:box].nil?
         if state[:parallels_token] && state[:parallels_import] != importing
           raise ActionFailed, "The Parallels source type changed. Run kitchen destroy before creating a new instance."
         end
-        return if state[:parallels_token]
+
+        if state[:parallels_token]
+          unless (state[:parallels_network] || {}) == network
+            raise ActionFailed, "The Parallels network configuration changed. Run kitchen destroy first."
+          end
+
+          return
+        end
 
         state[:parallels_token] = SecureRandom.uuid
         # The name lets us recover if prlctl succeeds before the UUID is saved.
         state[:parallels_name] = managed_vm_name(state[:parallels_token])
         state[:parallels_import] = importing
+        state[:parallels_network] = network unless network.empty?
         state[:parallels_key_injected] = false
         state[:parallels_uuid] = state[:parallels_token] if importing
         checkpoint(state)
@@ -380,7 +401,7 @@ module Kitchen
         FileUtils.remove_entry_secure(directory) if File.exist?(directory)
       end
 
-      def start_vm(vm, volumes, imported:, first_boot:)
+      def start_vm(vm, volumes, imported:, first_boot:, network:)
         uuid = vm.fetch("uuid")
         status = vm.fetch("status")
         return if status == "running"
@@ -395,22 +416,28 @@ module Kitchen
         settings.push("--cpus", config[:cpus].to_s) if config[:cpus]
         settings.push("--memsize", config[:memory].to_s) if config[:memory]
         prlctl("set", uuid, *settings)
+        configure_network(uuid, network)
         configure_hardware(uuid, volumes, imported: imported)
         prlctl("start", uuid)
       end
 
-      def wait_for_ip(uuid)
+      def wait_for_ip(uuid, network:)
+        static_address = network[:static_ip]&.split("/")&.first
         start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         deadline = start + config[:ip_timeout]
         lease_fallback_at = start + [10, config[:ip_timeout] / 2.0].min
+        configure_static_guest(uuid, network.fetch(:static_ip), deadline) if static_address
         loop do
-          vms = vm_list
+          vms = static_address ? vm_list(timeout: static_readiness_remaining(deadline)) : vm_list
           vm = vms.find { |entry| entry.fetch("uuid") == uuid }
           raise ActionFailed, "Parallels VM #{uuid} disappeared during boot" unless vm
 
           now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          address = reported_ips(vm).find { |value| usable_ipv4?(value) }
-          address ||= leased_ipv4(vm) if now >= lease_fallback_at
+          static_readiness_remaining(deadline) if static_address
+          address = reported_ips(vm).find { |value| static_address ? value == static_address : usable_ipv4?(value) }
+          if !static_address && network[:mode] != "bridged" && now >= lease_fallback_at
+            address ||= leased_ipv4(vm)
+          end
           if address
             if vms.any? { |entry| entry != vm && entry["status"] == "running" && reported_ips(entry).include?(address) }
               raise ActionFailed, "Multiple running Parallels VMs report #{address}. Use a base image with a unique DHCP identity for each clone."
@@ -420,7 +447,7 @@ module Kitchen
           end
 
           remaining = deadline - now
-          raise ActionFailed, "No guest IPv4 address for #{uuid}. Check shared networking and Parallels Tools." if remaining <= 0
+          raise ActionFailed, "No guest IPv4 address for #{uuid}. Check guest networking and Parallels Tools." if remaining <= 0
 
           sleep([2, remaining].min)
         end
@@ -437,8 +464,8 @@ module Kitchen
         false
       end
 
-      def vm_list
-        inventory = read_json(prlctl("list", "--all", "--full", "--output", "uuid,status,ip_configured,mac,name", "--json"), "prlctl list")
+      def vm_list(**options)
+        inventory = read_json(prlctl("list", "--all", "--full", "--output", "uuid,status,ip_configured,mac,name", "--json", **options), "prlctl list")
         unless inventory.is_a?(Array) && inventory.all? { |vm| vm.is_a?(Hash) && %w{uuid name status}.all? { |key| vm[key].is_a?(String) && !vm[key].empty? } }
           raise ActionFailed, "Invalid VM inventory from prlctl list: expected UUID, name and status for each VM"
         end
@@ -452,13 +479,13 @@ module Kitchen
         raise ActionFailed, "Invalid JSON from #{source}: #{e.message}"
       end
 
-      def prlctl(*arguments)
-        command("prlctl", *arguments)
+      def prlctl(*arguments, **options)
+        command("prlctl", *arguments, **options)
       end
 
-      def command(*arguments)
+      def command(*arguments, timeout: 600)
         debug("Running #{arguments.inspect}")
-        process = Mixlib::ShellOut.new(*arguments, timeout: 600)
+        process = Mixlib::ShellOut.new(*arguments, timeout: timeout)
         process.run_command
         process.error!
         process.stdout
