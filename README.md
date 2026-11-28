@@ -89,8 +89,10 @@ with secure SSH credentials already installed and set `insert_key: false`.
 For a static address, set `driver.static_ip` to an unused IPv4 address with a
 CIDR prefix on the selected network. Start with a DHCP-configured image.
 Static addressing requires Parallels Tools and guest support for applying its
-IPv4 settings. An address already configured in the image can remain active. Kitchen waits for the requested
-address before connecting. For example, on a host-only subnet with an address
+IPv4 settings. On guests using Netplan with systemd-networkd, Kitchen writes
+a Netplan override for the adapter to disable IPv4 DHCP and set the address.
+Kitchen checks the address and prefix in the guest before connecting. For
+example, on a host-only subnet with an address
 reserved outside DHCP allocation:
 
 ```yaml

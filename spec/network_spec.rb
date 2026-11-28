@@ -16,21 +16,51 @@ describe Kitchen::Driver::Parallels do
     assert_empty state
   end
 
+  it "rejects invalid static IPv4 settings before touching Parallels" do
+    [nil, "host-only", "host-only", "host-only", "host-only"].zip(
+      %w{10.37.129.10/24 10.37.129.10 10.37.129.10/33 127.0.0.1/24 999.37.129.10/24}
+    ).each do |mode, cidr|
+      driver = Kitchen::Driver::Parallels.new(box: "fixture.box", network_mode: mode, static_ip: cidr)
+      state = {}
+
+      error = assert_raises(Kitchen::ActionFailed) { driver.create(state) }
+      assert_match(/static_ip requires/, error.message)
+      assert_empty state
+    end
+  end
+
   it "waits for the requested host-only address rather than an earlier reported address" do
     with_network_driver({ mode: "host-only", static_ip: "10.37.129.10/24" }, network_mode: "host-only", static_ip: "10.37.129.10/24") do |driver, state, vm|
       vm["ip_configured"] = "10.37.129.9,10.37.129.10"
       vm["status"] = "stopped"
       settings = []
+      guest_attempts = 0
+      starts = 0
       command = lambda do |*args|
         case args[1]
         when "list" then JSON.generate([vm])
         when "set" then settings << args.drop(3)
-        when "start" then vm["status"] = "running"
+        when "start"
+          starts += 1
+          vm["status"] = "running"
+        when "exec"
+          assert_equal "running", vm["status"]
+          assert_equal state[:parallels_uuid], args[2]
+          assert_match(%r{10\.37\.129\.10/24\z}, args.fetch(3))
+          guest_attempts += 1
+          raise Kitchen::ActionFailed, "Guest adapter still uses DHCP" if guest_attempts == 1
         else flunk("Unexpected command: #{args.inspect}")
         end
       end
 
-      driver.stub(:command, command) { driver.create(state) }
+      driver.stub(:command, command) do
+        error = assert_raises(Kitchen::ActionFailed) { driver.create(state) }
+        assert_match(/still uses DHCP/, error.message)
+        refute state.key?(:hostname)
+        driver.create(state)
+      end
+      assert_equal 1, starts
+      assert_equal 2, guest_attempts
       assert_includes settings, %w{--device-set net0 --type host-only}
       assert_includes settings, %w{--device-set net0 --ipadd 10.37.129.10/24}
       assert_equal "10.37.129.10", state[:hostname]

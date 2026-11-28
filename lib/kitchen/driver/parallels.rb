@@ -57,6 +57,7 @@ module Kitchen
         state[:parallels_uuid] = vm.fetch("uuid")
         checkpoint(state)
         start_vm(vm, volumes, imported: state[:parallels_import], network: network)
+        configure_static_guest(state[:parallels_uuid], network[:static_ip]) if network[:static_ip]
         state[:hostname] = wait_for_ip(state[:parallels_uuid], network: network)
         configure_ssh(state)
         instance.transport.connection(state).wait_until_ready

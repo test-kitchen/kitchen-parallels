@@ -44,6 +44,46 @@ module Kitchen
         prlctl("set", uuid, "--device-set", "net0", "--ipadd", network.fetch(:static_ip))
       end
 
+      def configure_static_guest(uuid, cidr)
+        guest_command(uuid, "/bin/sh", "-eu", "-c", <<~'SH', "kitchen-static-ip", cidr)
+          cidr=$1
+          # Explicit networking supports images with a single Ethernet adapter.
+          nic=
+          for device in /sys/class/net/*/device; do
+            path=${device%/device}
+            [ -d "$device" ] && [ "$(cat "$path/type")" = 1 ] || continue
+            [ -z "$nic" ] || { echo "Static IPv4 requires one Ethernet adapter" >&2; exit 1; }
+            nic=${path##*/}
+          done
+          [ -n "$nic" ] || { echo "No Ethernet adapter for static IPv4" >&2; exit 1; }
+
+          # The Netplan definition ID can differ from the running interface name.
+          if command -v netplan >/dev/null && command -v networkctl >/dev/null; then
+            definition=$(LC_ALL=C networkctl status --no-pager "$nic" |
+              sed -n 's|^ *Network File: /run/systemd/network/10-netplan-\(.*\)\.network$|\1|p')
+            if [ -n "$definition" ]; then
+              netplan set --origin-hint 99-kitchen-static "ethernets.$definition={dhcp4: false, addresses: [$cidr]}"
+              netplan apply
+            fi
+          fi
+
+          # Parallels can report its configured IP before the guest owns it.
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            addresses=$(ip -4 -o addr show dev "$nic" scope global)
+            if echo "$addresses" | awk -v cidr="$cidr" '
+              $4 == cidr { found = 1 }
+              /[[:space:]]dynamic[[:space:]]/ { dynamic = 1 }
+              END { exit !(found && !dynamic) }
+            '; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Guest adapter $nic did not acquire static IPv4 $cidr without DHCP" >&2
+          exit 1
+        SH
+      end
+
       def install_port_forward(state)
         name, expected = port_forward_rule(state)
         with_shared_tcp_rules do |rules|
