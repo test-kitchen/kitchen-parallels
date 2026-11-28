@@ -102,10 +102,7 @@ module Kitchen
         # The name lets us recover if prlctl succeeds before the UUID is saved.
         state[:parallels_name] = "kitchen-#{instance.name}-#{state[:parallels_token]}"
         state[:parallels_import] = importing
-        if importing
-          state[:parallels_uuid] = state[:parallels_token]
-          state[:parallels_first_boot] = true
-        end
+        state[:parallels_uuid] = state[:parallels_token] if importing
         checkpoint(state)
       end
 
@@ -115,6 +112,8 @@ module Kitchen
 
       def create_vm(state)
         if state[:parallels_import]
+          state[:parallels_first_boot] = true
+          checkpoint(state)
           import_box(state)
         else
           checkpoint(state) if state.delete(:parallels_uuid)

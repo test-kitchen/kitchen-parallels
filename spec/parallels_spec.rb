@@ -27,7 +27,7 @@ describe Kitchen::Driver::Parallels do
     _(intercept_vm_create.last(2).first).must_equal defaults
   end
 
-  it "cold boots a freshly imported suspended VM with hardware overrides and resumes it on later creates" do
+  it "cold boots suspended imports with hardware overrides and resumes an existing VM on retry" do
     Dir.mktmpdir do |root|
       path = File.join(root, "kitchen.yml")
       box = File.join(root, "source.pvm")
@@ -49,6 +49,8 @@ describe Kitchen::Driver::Parallels do
         when "list"
           args.include?("--info") ? "[{}]" : JSON.generate([vm].compact)
         when "register"
+          state = Kitchen::StateFile.new(root, instance.name).read
+          assert state[:parallels_first_boot], "first boot must be saved before registration"
           vm = { uuid: args[args.index("--uuid") + 1], name: args.last, status: "suspended" }
         end
       end
@@ -60,18 +62,22 @@ describe Kitchen::Driver::Parallels do
               error = assert_raises(Kitchen::InstanceFailure) { instance.create }
               _(error.cause.message).must_equal "boot intercepted"
             end
+
+            vm = nil
+            error = assert_raises(Kitchen::InstanceFailure) { instance.create }
+            _(error.cause.message).must_equal "boot intercepted"
           end
         end
       end
 
       uuid = vm.fetch(:uuid)
       power_and_settings = commands.select { |command| %w{stop set start resume}.include?(command.first) }
-      _(power_and_settings).must_equal [
+      cold_boot = [
         ["stop", uuid, "--drop-state"],
-        ["set", uuid, *%w{--startup-view headless --shf-host off --smart-mount off --cpus 3}],
+        ["set", uuid] + %w{--startup-view headless --shf-host off --smart-mount off --cpus 3},
         ["start", uuid],
-        ["resume", uuid],
       ]
+      _(power_and_settings).must_equal(cold_boot + [["resume", uuid]] + cold_boot)
     end
   end
 
