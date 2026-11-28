@@ -108,15 +108,18 @@ module Kitchen
 
       def validate_box
         box = config[:box]
-        if box.is_a?(Hash)
+        case box
+        when Hash
           manifest = config[:box_manifest] || ENV[Box::Catalog::ENV_KEY]
           manifest = File.expand_path(manifest, config[:kitchen_root]) unless manifest.to_s.empty?
           catalog = Box::Catalog.new(manifest)
           entry = catalog.find(name: box[:name], version: box[:version], provider: "parallels")
           catalog.verify(entry)
-        else
-          path = File.expand_path(box.to_s, config[:kitchen_root])
+        when String
+          path = File.expand_path(box, config[:kitchen_root])
           validate_box_path(path)
+        else
+          raise ActionFailed, "driver.box must be a local path or a catalog selector"
         end
       end
 
@@ -128,9 +131,9 @@ module Kitchen
       end
 
       def validate_source
-        if config[:source_vm]
+        if !config[:source_vm].nil?
           find_source_vm
-        elsif config[:box]
+        elsif !config[:box].nil?
           validate_box
         end
       end
