@@ -21,11 +21,10 @@ describe Kitchen::Driver::Parallels do
   end
 
   it "sets only the specified hardware options" do
-    _(intercept_vm_create(cpus: 3).flatten).wont_include "--memsize"
-    _(intercept_vm_create(memory: 2048).flatten).wont_include "--cpus"
-    defaults = intercept_vm_create.flatten
-    _(defaults).wont_include "--cpus"
-    _(defaults).wont_include "--memsize"
+    defaults = %w{set disposable --startup-view headless --shf-host off --smart-mount off}
+    _(intercept_vm_create(cpus: 3).last(2).first).must_equal(defaults + %w{--cpus 3})
+    _(intercept_vm_create(memory: 2048).last(2).first).must_equal(defaults + %w{--memsize 2048})
+    _(intercept_vm_create.last(2).first).must_equal defaults
   end
 
   it "rejects invalid hardware values before invoking Parallels" do
