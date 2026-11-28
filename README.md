@@ -77,6 +77,20 @@ configured separately with `transport.max_wait_until_ready`.
 The driver checks the address reported by Parallels Tools first and uses
 active Parallels DHCP leases for the VM's MAC address as a fallback.
 
+Set `driver.cpus` for the number of virtual processors and `driver.memory`
+for the memory in megabytes. Both accept positive integers. You can set them
+independently, and the VM keeps the source image's setting for each option
+you omit. If an imported image has a saved session and you specify either
+option, Kitchen discards the imported copy’s saved session and boots it
+with the requested hardware.
+
+```yaml
+driver:
+  name: parallels
+  cpus: 3
+  memory: 2048
+```
+
 ## Package a stopped instance
 
 Shut down the guest without destroying the Kitchen instance, then run

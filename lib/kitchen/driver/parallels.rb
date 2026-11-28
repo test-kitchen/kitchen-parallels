@@ -31,6 +31,8 @@ module Kitchen
       default_config :box_manifest
       default_config :box_cache
       default_config :ip_timeout, 180
+      default_config :cpus
+      default_config :memory
       default_config :insert_key do |driver|
         driver[:box].is_a?(Hash) || File.extname(driver[:box].to_s) == ".box"
       end
@@ -49,7 +51,8 @@ module Kitchen
         vm = find_vm(state) || create_vm(state)
         state[:parallels_uuid] = vm.fetch("uuid")
         checkpoint(state)
-        start_vm(vm, volumes, imported: state[:parallels_import])
+        start_vm(vm, volumes, imported: state[:parallels_import], first_boot: state[:parallels_first_boot])
+        checkpoint(state) if state.delete(:parallels_first_boot)
         state[:hostname] = wait_for_ip(state[:parallels_uuid])
         configure_ssh(state)
         instance.transport.connection(state).wait_until_ready
@@ -151,6 +154,13 @@ module Kitchen
         unless (timeout.is_a?(Integer) || timeout.is_a?(Float)) && timeout.finite? && timeout > 0
           raise ActionFailed, "driver.ip_timeout must be a positive number of seconds"
         end
+
+        %i{cpus memory}.each do |key|
+          value = config[key]
+          next if value.nil? || (value.is_a?(Integer) && value > 0)
+
+          raise ActionFailed, "driver.#{key} must be a positive integer"
+        end
       end
 
       def prepare_state(state)
@@ -175,6 +185,8 @@ module Kitchen
 
       def create_vm(state)
         if state[:parallels_import]
+          state[:parallels_first_boot] = true
+          checkpoint(state)
           import_box(state)
         else
           checkpoint(state) if state.delete(:parallels_uuid)
@@ -280,18 +292,23 @@ module Kitchen
         FileUtils.remove_entry_secure(directory) if File.exist?(directory)
       end
 
-      def start_vm(vm, volumes, imported:)
+      def start_vm(vm, volumes, imported:, first_boot:)
         uuid = vm.fetch("uuid")
-        return if vm.fetch("status") == "running"
+        status = vm.fetch("status")
+        return if status == "running"
 
-        case vm.fetch("status")
-        when "suspended", "paused"
-          prlctl("resume", uuid)
-        else
-          prlctl("set", uuid, "--startup-view", "headless", "--shf-host", "off", "--smart-mount", "off")
-          configure_hardware(uuid, volumes, imported: imported)
-          prlctl("start", uuid)
+        if %w{suspended paused}.include?(status)
+          return prlctl("resume", uuid) unless first_boot && (config[:cpus] || config[:memory])
+
+          prlctl("stop", uuid, status == "suspended" ? "--drop-state" : "--kill")
         end
+
+        settings = %w{--startup-view headless --shf-host off --smart-mount off}
+        settings.push("--cpus", config[:cpus].to_s) if config[:cpus]
+        settings.push("--memsize", config[:memory].to_s) if config[:memory]
+        prlctl("set", uuid, *settings)
+        configure_hardware(uuid, volumes, imported: imported)
+        prlctl("start", uuid)
       end
 
       def wait_for_ip(uuid)
