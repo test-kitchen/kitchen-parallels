@@ -128,13 +128,47 @@ Both commands accept `--json`. Doctor checks paths and sizes by default.
 `--checksum` reads the contents of each selected archive. The commands work
 outside a Kitchen project.
 
+## Download a pinned remote box
+
+Use a local catalog with an HTTPS `url` in place of `file`. Record the
+archive's exact byte count and SHA-256 from a trusted source. Keep separate
+entries for each version, provider and architecture you offer. For example,
+the following catalog structure uses illustrative values for the URL, size
+and digest.
+
+```json
+[
+  {
+    "name": "bento/ubuntu-24.04",
+    "version": "202510.26.0",
+    "provider": "parallels",
+    "architecture": "arm64",
+    "url": "https://boxes.example.org/ubuntu-24.04-202510.26.0-parallels-arm64.box",
+    "bytes": 123456789,
+    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+]
+```
+
+Point `driver.box_manifest` at the catalog and set `driver.box` to
+`{ name: bento/ubuntu-24.04, version: "202510.26.0" }`. On create, Kitchen
+streams the matching archive into its cache and checks its size and SHA-256
+before Parallels imports it. Later creates reuse the verified cache entry.
+
+To update, add the new version and its integrity values to the catalog, run
+`kitchen destroy`, change the pinned version in `driver.box`, then run
+`kitchen create`. Remote entries require a Test Kitchen release with URL
+catalog support. Use `kitchen box doctor --checksum` to download and verify
+remote entries. Filter by name, version, provider and architecture to check
+a specific archive.
+
 ## Vagrant compatibility
 
 The driver covers local boxes, Linux SSH bootstrap, native shared folders and
 blank extra disks. These Vagrant features still need a separate implementation
 or a different driver:
 
-- Remote box lookup, downloads, automatic version checks and updates.
+- Automatic discovery of boxes, versions and updates from Vagrant registries.
 - Other hypervisors, Windows and WinRM, port forwarding, bridged and private
   network setup, and static IP configuration.
 - Linked clones and snapshots, VM packaging, Vagrantfile hooks, arbitrary
