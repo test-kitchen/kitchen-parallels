@@ -65,15 +65,20 @@ module Kitchen
         nil
       end
 
-      def guest_command(uuid, *arguments)
-        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 30
+      def guest_command(uuid, *arguments, readiness_deadline: nil)
+        deadline = readiness_deadline || Process.clock_gettime(Process::CLOCK_MONOTONIC) + 30
         begin
+          if readiness_deadline
+            remaining = static_readiness_remaining(deadline)
+            return prlctl("exec", uuid, Shellwords.join(yield(remaining)), timeout: remaining)
+          end
+
           prlctl("exec", uuid, Shellwords.join(arguments))
         rescue ActionFailed => e
           raise unless e.message.include?("Unable to open new session in this virtual machine") &&
             Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
 
-          sleep 2
+          sleep(readiness_deadline ? [2, static_readiness_remaining(deadline)].min : 2)
           retry
         end
       end
