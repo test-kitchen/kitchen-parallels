@@ -11,6 +11,31 @@ permissions:
   contents: read
 
 jobs:
+  portable:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      BUNDLE_WITHOUT: development:smoke
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '4.0'
+          bundler-cache: true
+      - name: Verify WinRM lifecycle with simulated Parallels and WinRM
+        run: bundle exec ruby -Ilib spec/winrm_spec.rb
+      - name: Load the Windows smoke configuration
+        working-directory: examples/windows
+        env:
+          BUNDLE_GEMFILE: ../../Gemfile
+          KITCHEN_PARALLELS_WINDOWS_BOX: /tmp/windows-smoke.box
+          KITCHEN_WINRM_CLIENT_CERT: /tmp/fixture.pem
+          KITCHEN_WINRM_CLIENT_KEY: /tmp/fixture-key.pem
+          KITCHEN_SMOKE_EXPECT_ARM64: '1'
+        run: bundle exec kitchen list
+
   smoke:
     if: >-
       vars.KITCHEN_WINDOWS_CI_ENABLED == 'true' &&
