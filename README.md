@@ -9,7 +9,7 @@ Run Test Kitchen against disposable Linux VMs on Parallels Desktop. The driver u
 - Parallels Desktop with full CLI access in the current macOS user session.
 - A prepared Linux guest for the Mac's CPU architecture, with Parallels Tools,
   shared networking, SSH and an account suitable for your provisioner.
-- Enough local disk space for a full copy per instance.
+- Local disk space for each instance's VM files.
 
 Run one instance at a time from a base image that shares its DHCP client ID
 across copies. For concurrent instances, prepare the guest to obtain an address
@@ -19,7 +19,17 @@ using the NIC's MAC address or another unique DHCP client ID.
 
 Run `bundle install` in this checkout to install Test Kitchen and the
 provisioners for the Apache smoke tests. Set `TEST_KITCHEN_PATH` to use a
-compatible local Test Kitchen checkout.
+compatible local Test Kitchen checkout. To run the unit suite and require the
+linked clone and lifecycle lock tests to be available, use a hook-enabled
+checkout and run:
+
+```sh
+TEST_KITCHEN_PATH=/path/to/test-kitchen bundle install
+TEST_KITCHEN_PATH=/path/to/test-kitchen REQUIRE_INSTANCE_LIFECYCLE=1 bundle exec rake test
+```
+
+Run `bundle exec rake test` with the released-core bundle to check the
+compatibility path.
 
 To use this driver from another project, add `kitchen-parallels` to its
 Gemfile. Bundler installs a compatible Test Kitchen version.
@@ -62,8 +72,64 @@ must contain one top-level `.pvm` bundle and a `metadata.json` declaring
 into its local `.kitchen` directory and registers that copy in Parallels.
 
 To use an already registered VM, set `source_vm` to its name or UUID in place
-of `box`. Shut down the registered source first. Parallels creates a full
-clone and Kitchen boots the clone.
+of `box`. Shut down the registered source first. By default, Parallels creates
+a full clone and Kitchen boots the clone.
+
+### Linked clones from a snapshot
+
+Set `source_snapshot` to opt in to a linked clone. Use a stopped, registered
+source VM with self-contained disks and an existing snapshot taken while
+the guest was shut down. Run `prlctl snapshot-list <source_vm>` to find the
+snapshot UUID. The host needs a Parallels Desktop edition that supports linked
+clones.
+
+```yaml
+driver:
+  name: parallels
+  source_vm: ubuntu-base
+  source_snapshot: "{7b485669-5347-4592-809c-a9274908bc18}"
+```
+
+Use SSH credentials that work in the snapshot. A linked clone depends on the
+source VM bundle and snapshot for its lifetime. Keep both in place and leave
+the clone bundle in its Kitchen instance directory. Run `kitchen destroy`
+before switching between full and linked clones or choosing a different
+snapshot. Kitchen removes the clone and its files and leaves the source VM
+and snapshot intact.
+
+Linked clones require Test Kitchen with the public
+`Driver::Base#with_instance_lifecycle` hook, including when tearing down
+previously saved linked state. Test Kitchen 4.2.1 supports full clones and
+box imports in projects without saved linked state. Kitchen loads all instances
+before filtering by name, so keep using the hook-enabled version for the whole
+project until all linked clones have been destroyed.
+
+With a hook-enabled core, the driver locks each instance across action
+selection, lifecycle hooks, and state changes. Use the same hook-enabled
+version for every Kitchen process sharing the workspace. Keep the
+`.parallels.lock` sidecar in place. The driver rejects recursive transitions
+on the same instance from the same thread. A lifecycle hook must never start
+and wait for another Kitchen process or thread targeting its locked instance.
+
+If the saved UUID is absent from Parallels, Kitchen can recover the clone by
+its generated name after verifying that its bundle is inside the instance
+directory. If Kitchen cannot verify a linked clone registration, stop all Kitchen
+processes using the workspace. Back up the instance state YAML and inspect
+`prlctl list --all --json` and `prlctl list <uuid> --info --json` against
+the saved UUID, generated name and bundle under `.kitchen/parallels-<token>`.
+If you can verify the linked clone, restore its generated name in Parallels
+and retry `kitchen destroy`. If its directory holds only unregistered
+files, move the directory aside after confirming that no Parallels VM uses
+it, then retry destroy. If ownership is unclear, preserve the state and
+files for investigation.
+
+`source_snapshot` requires `source_vm`. To use a box, omit
+`source_snapshot` and let Kitchen import it, or register a disposable copy
+as the source and take its snapshot first. Parallels detaches external disks
+when creating the linked clone. If the guest needs an external disk to boot
+or run, prepare a self-contained source before taking the snapshot. If the
+installed edition lacks linked clone support, omit `source_snapshot` to
+make a full clone of the stopped VM.
 
 ```sh
 bundle exec kitchen create
@@ -183,8 +249,8 @@ bundle exec kitchen create INSTANCE
 
 Restore uses the saved VM UUID and checks the registered VM name against
 Kitchen's ownership token. This works for Kitchen imports and full clones
-whose registered names still match the state file. The source VM and source
-box are untouched. Pass a snapshot UUID from that VM's inventory, with or
+whose registered names still match the state file. Linked clones are excluded.
+The source VM and source box are untouched. Pass a snapshot UUID from that VM's inventory, with or
 without braces. Running, paused and suspended VMs and snapshots taken while
 the guest was running are outside this workflow.
 
@@ -238,7 +304,7 @@ or a different driver:
 
 - Remote box lookup, downloads, automatic version checks and updates.
 - Other hypervisors, Windows and WinRM.
-- Linked clones, Vagrantfile hooks, arbitrary
+- Vagrantfile hooks, arbitrary
   provider customisation, Vagrant provisioning and guest environment settings.
 - NFS, SMB and Vagrant rsync shared folders, host or guest tool management, and
   the Vagrant Chef cache options.

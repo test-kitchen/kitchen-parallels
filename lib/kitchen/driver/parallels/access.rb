@@ -9,7 +9,7 @@ module Kitchen
       private
 
       def refuse_package_with_injected_key(state)
-        key = File.join(import_directory(state), "ssh_key")
+        key = File.join(instance_directory(state), "ssh_key")
         persisted = StateFile.new(config[:kitchen_root], instance.name).read
         evidence = [state, persisted].any? { |record| record[:parallels_generated_key] || record[:parallels_key_injected] }
         if evidence || File.exist?(key) || File.symlink?(key)
@@ -39,7 +39,7 @@ module Kitchen
           state[:parallels_key_injected] = true
           checkpoint(state)
         end
-        path = Box::SshBootstrap.install(import_directory(state), runner: method(:command)) do |arguments|
+        path = Box::SshBootstrap.install(instance_directory(state), runner: method(:command)) do |arguments|
           guest_command(state.fetch(:parallels_uuid), "runuser", "-u", user, "--", "/bin/sh", *arguments)
         end
         state[:ssh_key] = path

@@ -118,7 +118,18 @@ describe "kitchen-parallels restore" do
     end
   end
 
-  def run_restore(registered_name: vm_name, vm_status: "stopped", inventory: nil, changed_vm: {}, switch_status: 0,
+  it "preserves state when restore is requested for a linked clone" do
+    skip "requires lifecycle hook" unless Kitchen::Driver::Base.public_method_defined?(:with_instance_lifecycle)
+
+    run_restore(source_snapshot: snapshot_id) do |status, output, calls, state|
+      refute status.success?
+      _(output).must_include "requires a full clone or an imported VM"
+      assert_empty calls
+      _(state.values_at(:last_action, :hostname)).must_equal ["converge", "192.0.2.10"]
+    end
+  end
+
+  def run_restore(source_snapshot: nil, registered_name: vm_name, vm_status: "stopped", inventory: nil, changed_vm: {}, switch_status: 0,
     snapshot_current: true, restored_status: "stopped", interrupt: false, rename_failure: false)
     Dir.mktmpdir do |root|
       executable = File.expand_path("../exe/kitchen-parallels", __dir__)
@@ -132,8 +143,10 @@ describe "kitchen-parallels restore" do
           - name: default
       YAML
       state_file = Kitchen::StateFile.new(root, instance_name)
-      state_file.write(parallels_token: ownership_token, parallels_uuid: vm_id, parallels_name: vm_name,
-        hostname: "192.0.2.10", last_action: "converge")
+      state = { parallels_token: ownership_token, parallels_uuid: vm_id, parallels_name: vm_name,
+                hostname: "192.0.2.10", last_action: "converge" }
+      state[:parallels_snapshot] = source_snapshot if source_snapshot
+      state_file.write(state)
       File.chmod(0o600, state_file.path)
       initial_vm = { uuid: vm_id, name: registered_name, status: vm_status }
       snapshots = { "{#{snapshot_id}}" => { "state" => "poweroff" } }

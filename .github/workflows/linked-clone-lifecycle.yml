@@ -1,0 +1,29 @@
+---
+name: Linked-clone lifecycle
+
+"on":
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linked-clone-lifecycle:
+    runs-on: ubuntu-latest
+    env:
+      BUNDLE_WITHOUT: development:smoke
+      REQUIRE_INSTANCE_LIFECYCLE: '1'
+      TEST_KITCHEN_PATH: ${{ github.workspace }}/kitchen-core
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: test-kitchen/test-kitchen
+          ref: 7fc81c995e2b432b18501e9e7009326840b221a9
+          path: kitchen-core
+          persist-credentials: false
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+      - run: bundle exec rake test

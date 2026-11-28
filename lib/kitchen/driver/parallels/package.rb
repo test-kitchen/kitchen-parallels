@@ -24,7 +24,7 @@ module Kitchen
 
         source_uuid = source.fetch("uuid")
         details = package_vm_info(source_uuid)
-        unless File.dirname(File.realpath(details.fetch("Home"))) == File.realpath(import_directory(state))
+        unless File.dirname(File.realpath(details.fetch("Home"))) == File.realpath(instance_directory(state))
           raise ActionFailed, "Could not confirm the Parallels VM belongs to the verified archive import"
         end
 
