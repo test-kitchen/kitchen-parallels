@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: test-kitchen/test-kitchen
-          ref: d983d211ab8642ee6acd87cee298302802ea5c4a
+          ref: 7fc81c995e2b432b18501e9e7009326840b221a9
           path: kitchen-core
           persist-credentials: false
       - uses: ruby/setup-ruby@v1
