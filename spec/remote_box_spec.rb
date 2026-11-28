@@ -66,7 +66,8 @@ describe "Parallels boxes through the Kitchen CLI" do
         abort "fixture registration failed" if File.exist?("fail-register")
 
         File.open("imports", "a") { |log| log.puts File.read(File.join(ARGV.fetch(1), "config.pvs")) }
-        File.write("vm.json", JSON.generate([{ uuid: ARGV.fetch(3), status: "running", ip_configured: "10.0.0.2" }]))
+        vm = { uuid: ARGV.fetch(3), name: ARGV.fetch(5), status: "running", ip_configured: "10.0.0.2" }
+        File.write("vm.json", JSON.generate([vm]))
       when "stop"
         # The next command deletes the VM.
       when "delete"

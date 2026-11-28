@@ -8,6 +8,23 @@ module Kitchen
 
       private
 
+      def refuse_package_with_injected_key(state)
+        key = File.join(import_directory(state), "ssh_key")
+        persisted = StateFile.new(config[:kitchen_root], instance.name).read
+        evidence = [state, persisted].any? { |record| record[:parallels_generated_key] || record[:parallels_key_injected] }
+        if evidence || File.exist?(key) || File.symlink?(key)
+          raise ActionFailed, "Cannot safely remove the Kitchen-injected SSH key from a stopped VM. " \
+            "Create a fresh instance with driver.insert_key disabled and supply your own SSH credentials."
+        end
+
+        if [state, persisted].all? { |record| record[:parallels_key_injected] == false }
+          return persisted
+        end
+
+        raise ActionFailed, "Cannot establish the SSH injection history of this Parallels instance. " \
+          "Create a fresh instance with driver.insert_key disabled and supply your own SSH credentials."
+      end
+
       def configure_ssh(state)
         transport = instance.transport
         if !config[:insert_key] || transport[:ssh_key] || transport[:password]
@@ -18,6 +35,10 @@ module Kitchen
 
         user = transport[:username]
         user = "vagrant" if user == "root" || user.nil?
+        unless state[:parallels_key_injected]
+          state[:parallels_key_injected] = true
+          checkpoint(state)
+        end
         path = Box::SshBootstrap.install(import_directory(state), runner: method(:command)) do |arguments|
           guest_command(state.fetch(:parallels_uuid), "runuser", "-u", user, "--", "/bin/sh", *arguments)
         end
@@ -44,15 +65,20 @@ module Kitchen
         nil
       end
 
-      def guest_command(uuid, *arguments)
-        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 30
+      def guest_command(uuid, *arguments, readiness_deadline: nil)
+        deadline = readiness_deadline || Process.clock_gettime(Process::CLOCK_MONOTONIC) + 30
         begin
+          if readiness_deadline
+            remaining = static_readiness_remaining(deadline)
+            return prlctl("exec", uuid, Shellwords.join(yield(remaining)), timeout: remaining)
+          end
+
           prlctl("exec", uuid, Shellwords.join(arguments))
         rescue ActionFailed => e
           raise unless e.message.include?("Unable to open new session in this virtual machine") &&
             Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
 
-          sleep 2
+          sleep(readiness_deadline ? [2, static_readiness_remaining(deadline)].min : 2)
           retry
         end
       end

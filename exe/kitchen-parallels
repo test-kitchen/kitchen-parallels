@@ -1,0 +1,23 @@
+#!/usr/bin/env ruby
+# Copyright 2026 Dan Webb
+# SPDX-License-Identifier: Apache-2.0
+
+require "kitchen"
+require "kitchen/driver/parallels"
+
+command, instance_name, snapshot_id = ARGV
+unless command == "restore" && ARGV.size == 3
+  abort "Usage: kitchen-parallels restore INSTANCE SNAPSHOT_UUID"
+end
+
+begin
+  instance = Kitchen::Config.new.instances.get(instance_name)
+  unless instance&.driver.is_a?(Kitchen::Driver::Parallels)
+    abort "No Parallels Kitchen instance named #{instance_name.inspect}"
+  end
+
+  instance.driver.restore_snapshot(snapshot_id)
+  puts "Restored #{instance.name}. Run kitchen create #{instance.name} to start it."
+rescue Kitchen::ClientError, Kitchen::ActionFailed, Kitchen::StateFileLoadError => e
+  abort e.message
+end
