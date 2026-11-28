@@ -143,6 +143,39 @@ configured separately with `transport.max_wait_until_ready`.
 The driver checks the address reported by Parallels Tools first and uses
 active Parallels DHCP leases for the VM's MAC address as a fallback.
 
+Set `driver.cpus` for the number of virtual processors and `driver.memory`
+for the memory in megabytes. Both accept positive integers. You can set them
+independently, and the VM keeps the source image's setting for each option
+you omit. If an imported image has a saved session and you specify either
+option, Kitchen discards the imported copy’s saved session and boots it
+with the requested hardware.
+
+```yaml
+driver:
+  name: parallels
+  cpus: 3
+  memory: 2048
+```
+
+## Package a stopped instance
+
+Shut down the guest without destroying the Kitchen instance, then run
+`kitchen package INSTANCE`. Kitchen writes `INSTANCE.box` in the project root
+and leaves the source VM registered and stopped. Use the resulting file as
+`driver.box` in another instance. An existing output file is preserved.
+
+Create a fresh instance from a reviewed `.box` archive that contains no
+Kitchen-injected SSH keys. Set `driver.package_source_sha256` to the SHA-256
+digest of that specific archive before creating the instance, set
+`driver.insert_key: false`, and supply your own transport credentials.
+Kitchen checks the archive against the digest during import. Inspect the
+base guest for inherited credentials before approving it. Existing instances,
+registered `source_vm` clones, and direct `.pvm` imports lack this import record.
+
+The package retains guest files and credentials you add. Eject optical
+images completely and keep virtual hard disks inside the VM bundle.
+Kitchen removes custom host shares and disables host sharing on the export clone.
+
 ## Shared folders and disks
 
 Add the options under the global driver to share them across platforms, or
@@ -212,6 +245,14 @@ Kitchen tracks each disposable VM in its instance state. If `create` fails
 after registration, retry it after fixing the cause or run `kitchen destroy`
 to remove the failed instance and its local copy. Destroy the instance before
 switching its source image or removing its `.kitchen` state.
+
+## Status and diagnostics
+
+Run `kitchen list --live` to see the state reported by Parallels for each
+managed VM. Add `--probe` to check transport connectivity as well.
+Run `kitchen doctor` to check host access and the configured VM source before
+creating an instance. These checks read the provider and local configuration
+without starting or modifying VMs.
 
 ## Apache smoke tests
 

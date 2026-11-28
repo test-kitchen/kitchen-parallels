@@ -12,8 +12,10 @@ require "kitchen/state_file"
 require "mixlib/shellout" unless defined?(Mixlib::ShellOut)
 require "securerandom" unless defined?(SecureRandom)
 require "shellwords" unless defined?(Shellwords)
+require "time" unless defined?(Time.zone_offset)
 require "tmpdir" unless defined?(Dir.mktmpdir)
 require_relative "parallels/access"
+require_relative "parallels/package"
 require_relative "parallels/volumes"
 
 module Kitchen
@@ -25,10 +27,13 @@ module Kitchen
 
       default_config :source_vm
       default_config :source_snapshot
+      default_config :package_source_sha256
       default_config :box
       default_config :box_manifest
       default_config :box_cache
       default_config :ip_timeout, 180
+      default_config :cpus
+      default_config :memory
       default_config :insert_key do |driver|
         driver[:box].is_a?(Hash) || File.extname(driver[:box].to_s) == ".box"
       end
@@ -36,6 +41,7 @@ module Kitchen
       default_config :additional_disks, []
 
       include ParallelsAccess
+      include ParallelsPackage
       include ParallelsVolumes
       include Box::Source
 
@@ -76,7 +82,8 @@ module Kitchen
         prepare_state(state)
         vm = find_vm(state) || create_vm(state)
         save_vm_uuid(state, vm)
-        start_vm(vm, volumes, imported: state[:parallels_import])
+        start_vm(vm, volumes, imported: state[:parallels_import], first_boot: state[:parallels_first_boot])
+        checkpoint(state) if state.delete(:parallels_first_boot)
         state[:hostname] = wait_for_ip(state[:parallels_uuid])
         configure_ssh(state)
         instance.transport.connection(state).wait_until_ready
@@ -101,6 +108,36 @@ module Kitchen
         release_box_source(state)
       end
 
+      def status(state)
+        id = state[:parallels_uuid]
+        unless id || state[:parallels_name]
+          return status_report(false, "not_created", "No managed VM is recorded for this instance")
+        end
+
+        vm = find_vm(state)
+        unless vm
+          return status_report(false, "not_created", "Parallels has no matching managed VM", id)
+        end
+
+        id = vm.fetch("uuid")
+        vm_state = vm.fetch("status")
+        status_report(vm_state == "running", vm_state, "Parallels reports the VM as #{vm_state}", id)
+      rescue ActionFailed => e
+        status_report(nil, "unknown", e.message, id)
+      end
+
+      def doctor(_state)
+        checks = [-> { vm_list }, method(:validate_config), method(:volume_configuration), method(:validate_source)]
+        problems = checks.filter_map do |check|
+          check.call
+          nil
+        rescue ActionFailed, UserError => e
+          e.message
+        end
+        problems.each { |problem| warn(problem) }
+        !problems.empty?
+      end
+
       private
 
       def lifecycle_hook_available?
@@ -118,6 +155,44 @@ module Kitchen
           raise ActionFailed, "Cannot lock Parallels instance #{instance.name}" unless lock.flock(File::LOCK_EX)
 
           yield
+        end
+      end
+
+      def status_report(live, state, message, id = nil)
+        { live: live, state: state, source: "driver", resource_id: id,
+          message: message, checked_at: Time.now.utc.iso8601 }
+      end
+
+      def validate_box
+        box = config[:box]
+        case box
+        when Hash
+          manifest = config[:box_manifest] || ENV[Box::Catalog::ENV_KEY]
+          manifest = File.expand_path(manifest, config[:kitchen_root]) unless manifest.to_s.empty?
+          catalog = Box::Catalog.new(manifest)
+          entry = catalog.find(name: box[:name], version: box[:version], provider: "parallels")
+          Box::Cache.new(config[:box_cache]).validate_destination(catalog, entry)
+          catalog.verify(entry)
+        when String
+          path = File.expand_path(box, config[:kitchen_root])
+          validate_box_path(path)
+        else
+          raise ActionFailed, "driver.box must be a local path or a catalog selector"
+        end
+      end
+
+      def validate_box_path(path)
+        return if (File.directory?(path) && File.extname(path) == ".pvm" ||
+          File.file?(path) && File.extname(path) == ".box") && File.readable?(path)
+
+        raise ActionFailed, "driver.box must point to a readable local Parallels .pvm bundle or .box archive: #{path}"
+      end
+
+      def validate_source
+        if !config[:source_vm].nil?
+          find_source_vm
+        elsif !config[:box].nil?
+          validate_box
         end
       end
 
@@ -140,6 +215,13 @@ module Kitchen
         unless (timeout.is_a?(Integer) || timeout.is_a?(Float)) && timeout.finite? && timeout > 0
           raise ActionFailed, "driver.ip_timeout must be a positive number of seconds"
         end
+
+        %i{cpus memory}.each do |key|
+          value = config[key]
+          next if value.nil? || (value.is_a?(Integer) && value > 0)
+
+          raise ActionFailed, "driver.#{key} must be a positive integer"
+        end
       end
 
       def prepare_state(state)
@@ -158,6 +240,7 @@ module Kitchen
         state[:parallels_name] = "kitchen-#{instance.name}-#{state[:parallels_token]}"
         state[:parallels_import] = importing
         state[:parallels_snapshot] = snapshot if snapshot
+        state[:parallels_key_injected] = false
         state[:parallels_uuid] = state[:parallels_token] if importing
         checkpoint(state)
       end
@@ -180,6 +263,8 @@ module Kitchen
 
       def create_vm(state)
         if state[:parallels_import]
+          state[:parallels_first_boot] = true
+          checkpoint(state)
           import_box(state)
         else
           checkpoint(state) if state.delete(:parallels_uuid)
@@ -237,6 +322,15 @@ module Kitchen
       end
 
       def clone_source(state)
+        vm = find_source_vm
+        if config[:source_snapshot]
+          clone_snapshot(vm.fetch("uuid"), state)
+        else
+          prlctl("clone", vm.fetch("uuid"), "--name", state[:parallels_name])
+        end
+      end
+
+      def find_source_vm
         source = config[:source_vm]
         vm = vm_list.find { |entry| entry.fetch("uuid") == source || entry.fetch("name") == source }
         raise ActionFailed, "Parallels source VM #{source.inspect} was not found" unless vm
@@ -244,11 +338,7 @@ module Kitchen
           raise ActionFailed, "Shut down the Parallels source VM #{source.inspect} before cloning it"
         end
 
-        if config[:source_snapshot]
-          clone_snapshot(vm.fetch("uuid"), state)
-        else
-          prlctl("clone", vm.fetch("uuid"), "--name", state[:parallels_name])
-        end
+        vm
       end
 
       def clone_snapshot(uuid, state)
@@ -262,10 +352,12 @@ module Kitchen
       end
 
       def import_box(state)
+        checkpoint(state) if state.delete(:parallels_package_source_sha256)
         source = box_source("parallels", state) { checkpoint(state) }
-        unless File.directory?(source) && File.extname(source) == ".pvm" ||
-            File.file?(source) && File.extname(source) == ".box"
-          raise ActionFailed, "driver.box must point to a local Parallels .pvm bundle or .box archive: #{source}"
+        validate_box_path(source)
+
+        if config[:package_source_sha256] && File.extname(source) != ".box"
+          raise ActionFailed, "driver.package_source_sha256 requires a .box archive"
         end
 
         directory = prepare_instance_directory(state)
@@ -274,13 +366,33 @@ module Kitchen
                    command("/usr/bin/ditto", source, destination)
                    destination
                  else
-                   unpack_box(source, directory)
+                   import_archive(source, directory)
                  end
         unless File.file?(File.join(bundle, "config.pvs"))
           raise ActionFailed, "Parallels bundle is missing config.pvs: #{bundle}"
         end
 
         prlctl("register", bundle, "--uuid", state[:parallels_uuid], "--name", state[:parallels_name])
+        if config[:package_source_sha256]
+          prlctl("set", state[:parallels_uuid], "--sync-ssh-ids", "off")
+          state[:parallels_package_source_sha256] = config[:package_source_sha256]
+        end
+      end
+
+      def import_archive(source, directory)
+        expected = config[:package_source_sha256]
+        return unpack_box(source, directory) unless expected
+
+        # Extract the same private copy whose bytes were verified.
+        Dir.mktmpdir("source-", directory) do |staging|
+          archive = File.join(staging, "source.box")
+          FileUtils.cp(source, archive)
+          unless expected.is_a?(String) && Digest::SHA256.file(archive).hexdigest == expected
+            raise ActionFailed, "Parallels source archive does not match driver.package_source_sha256"
+          end
+
+          unpack_box(archive, directory)
+        end
       end
 
       def unpack_box(source, directory)
@@ -315,18 +427,23 @@ module Kitchen
         FileUtils.remove_entry_secure(directory) if File.exist?(directory)
       end
 
-      def start_vm(vm, volumes, imported:)
+      def start_vm(vm, volumes, imported:, first_boot:)
         uuid = vm.fetch("uuid")
-        return if vm.fetch("status") == "running"
+        status = vm.fetch("status")
+        return if status == "running"
 
-        case vm.fetch("status")
-        when "suspended", "paused"
-          prlctl("resume", uuid)
-        else
-          prlctl("set", uuid, "--startup-view", "headless", "--shf-host", "off", "--smart-mount", "off")
-          configure_hardware(uuid, volumes, imported: imported)
-          prlctl("start", uuid)
+        if %w{suspended paused}.include?(status)
+          return prlctl("resume", uuid) unless first_boot && (config[:cpus] || config[:memory])
+
+          prlctl("stop", uuid, status == "suspended" ? "--drop-state" : "--kill")
         end
+
+        settings = %w{--startup-view headless --shf-host off --smart-mount off}
+        settings.push("--cpus", config[:cpus].to_s) if config[:cpus]
+        settings.push("--memsize", config[:memory].to_s) if config[:memory]
+        prlctl("set", uuid, *settings)
+        configure_hardware(uuid, volumes, imported: imported)
+        prlctl("start", uuid)
       end
 
       def wait_for_ip(uuid)
@@ -368,7 +485,12 @@ module Kitchen
       end
 
       def vm_list
-        read_json(prlctl("list", "--all", "--full", "--output", "uuid,status,ip_configured,mac,name", "--json"), "prlctl list")
+        inventory = read_json(prlctl("list", "--all", "--full", "--output", "uuid,status,ip_configured,mac,name", "--json"), "prlctl list")
+        unless inventory.is_a?(Array) && inventory.all? { |vm| vm.is_a?(Hash) && %w{uuid name status}.all? { |key| vm[key].is_a?(String) && !vm[key].empty? } }
+          raise ActionFailed, "Invalid VM inventory from prlctl list: expected UUID, name and status for each VM"
+        end
+
+        inventory
       end
 
       def read_json(output, source)
