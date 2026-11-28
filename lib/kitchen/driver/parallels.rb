@@ -57,7 +57,6 @@ module Kitchen
         state[:parallels_uuid] = vm.fetch("uuid")
         checkpoint(state)
         start_vm(vm, volumes, imported: state[:parallels_import], network: network)
-        configure_static_guest(state[:parallels_uuid], network[:static_ip]) if network[:static_ip]
         state[:hostname] = wait_for_ip(state[:parallels_uuid], network: network)
         configure_ssh(state)
         instance.transport.connection(state).wait_until_ready
@@ -222,12 +221,14 @@ module Kitchen
         start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         deadline = start + config[:ip_timeout]
         lease_fallback_at = start + [10, config[:ip_timeout] / 2.0].min
+        configure_static_guest(uuid, network.fetch(:static_ip), deadline) if static_address
         loop do
-          vms = vm_list
+          vms = static_address ? vm_list(timeout: static_readiness_remaining(deadline)) : vm_list
           vm = vms.find { |entry| entry.fetch("uuid") == uuid }
           raise ActionFailed, "Parallels VM #{uuid} disappeared during boot" unless vm
 
           now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          static_readiness_remaining(deadline) if static_address
           address = reported_ips(vm).find { |value| static_address ? value == static_address : usable_ipv4?(value) }
           if !static_address && network[:mode] != "bridged" && now >= lease_fallback_at
             address ||= leased_ipv4(vm)
@@ -258,8 +259,8 @@ module Kitchen
         false
       end
 
-      def vm_list
-        read_json(prlctl("list", "--all", "--full", "--output", "uuid,status,ip_configured,mac,name", "--json"), "prlctl list")
+      def vm_list(**options)
+        read_json(prlctl("list", "--all", "--full", "--output", "uuid,status,ip_configured,mac,name", "--json", **options), "prlctl list")
       end
 
       def read_json(output, source)
@@ -268,13 +269,13 @@ module Kitchen
         raise ActionFailed, "Invalid JSON from #{source}: #{e.message}"
       end
 
-      def prlctl(*arguments)
-        command("prlctl", *arguments)
+      def prlctl(*arguments, **options)
+        command("prlctl", *arguments, **options)
       end
 
-      def command(*arguments)
+      def command(*arguments, timeout: 600)
         debug("Running #{arguments.inspect}")
-        process = Mixlib::ShellOut.new(*arguments, timeout: 600)
+        process = Mixlib::ShellOut.new(*arguments, timeout: timeout)
         process.run_command
         process.error!
         process.stdout

@@ -44,8 +44,8 @@ module Kitchen
         prlctl("set", uuid, "--device-set", "net0", "--ipadd", network.fetch(:static_ip))
       end
 
-      def configure_static_guest(uuid, cidr)
-        guest_command(uuid, "/bin/sh", "-eu", "-c", <<~'SH', "kitchen-static-ip", cidr)
+      def configure_static_guest(uuid, cidr, deadline)
+        script = <<~'SH'
           cidr=$1
           # Explicit networking supports images with a single Ethernet adapter.
           nic=
@@ -57,20 +57,25 @@ module Kitchen
           done
           [ -n "$nic" ] || { echo "No Ethernet adapter for static IPv4" >&2; exit 1; }
 
-          # The Netplan definition ID can differ from the running interface name.
+          trap 'echo "Guest adapter $nic did not acquire static IPv4 $cidr without DHCP" >&2; exit 1' TERM
+          discover_netplan=
           if command -v netplan >/dev/null && command -v networkctl >/dev/null; then
-            definition=$(LC_ALL=C networkctl status --no-pager "$nic" |
-              sed -n 's|^ *Network File: /run/systemd/network/10-netplan-\(.*\)\.network$|\1|p')
-            if [ -n "$definition" ]; then
-              netplan set --origin-hint 99-kitchen-static "ethernets.$definition={dhcp4: false, addresses: [$cidr]}"
-              netplan apply
-            fi
+            discover_netplan=yes
           fi
+          while :; do
+            # The definition ID can differ from the NIC name, and networkd may still be starting.
+            if [ -n "$discover_netplan" ] && status=$(LC_ALL=C networkctl status --no-pager "$nic" 2>/dev/null); then
+              definition=$(echo "$status" |
+                sed -n 's|^ *Network File: /run/systemd/network/10-netplan-\(.*\)\.network$|\1|p')
+              if [ -n "$definition" ]; then
+                netplan set --origin-hint 99-kitchen-static "ethernets.$definition={dhcp4: false, addresses: [$cidr]}"
+                netplan apply
+                discover_netplan=
+              fi
+            fi
 
-          # Parallels can report its configured IP before the guest owns it.
-          for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            addresses=$(ip -4 -o addr show dev "$nic" scope global)
-            if echo "$addresses" | awk -v cidr="$cidr" '
+            # Parallels can report its configured IP before the guest owns it.
+            if addresses=$(ip -4 -o addr show dev "$nic" scope global) && echo "$addresses" | awk -v cidr="$cidr" '
               $4 == cidr { found = 1 }
               /[[:space:]]dynamic[[:space:]]/ { dynamic = 1 }
               END { exit !(found && !dynamic) }
@@ -79,9 +84,17 @@ module Kitchen
             fi
             sleep 1
           done
-          echo "Guest adapter $nic did not acquire static IPv4 $cidr without DHCP" >&2
-          exit 1
         SH
+        guest_command(uuid, readiness_deadline: deadline) do |remaining|
+          ["timeout", format("%.9fs", remaining), "/bin/sh", "-eu", "-c", script, "kitchen-static-ip", cidr]
+        end
+      end
+
+      def static_readiness_remaining(deadline)
+        remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        raise ActionFailed, "Timed out waiting for static guest IPv4 readiness" if remaining <= 0
+
+        remaining
       end
 
       def install_port_forward(state)

@@ -3,6 +3,7 @@
 
 require "minitest/autorun"
 require "minitest/mock"
+require "open3"
 require "kitchen/driver/parallels"
 
 describe Kitchen::Driver::Parallels do
@@ -14,6 +15,46 @@ describe Kitchen::Driver::Parallels do
     error = assert_raises(Kitchen::ActionFailed) { driver.create(state) }
     assert_match(/requires.*shared/, error.message)
     assert_empty state
+  end
+
+  it "retries Netplan discovery and applies the profile once while the address settles" do
+    driver = Kitchen::Driver::Parallels.new
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 30
+    execute = lambda do |_uuid, readiness_deadline:, &arguments|
+      assert_equal deadline, readiness_deadline
+      _, _, shell, flags, command_flag, script, name, cidr = arguments.call(30)
+      Dir.mktmpdir do |root|
+        FileUtils.mkdir_p("#{root}/eth0/device")
+        File.write("#{root}/eth0/type", "1\n")
+        commands = <<~'SH'
+          elapsed=0
+          sleep() {
+            elapsed=$((elapsed + 1))
+            [ "$elapsed" -lt 6 ]
+          }
+          networkctl() {
+            [ "$elapsed" -gt 0 ] || return 1
+            [ "$elapsed" -ge 2 ] || return 0
+            echo '  Network File: /run/systemd/network/10-netplan-uplink.network'
+          }
+          netplan() { echo "$*"; }
+          ip() {
+            [ "$elapsed" -ge 4 ] || return 1
+            echo '2: eth0 inet 10.37.129.10/24 scope global eth0'
+          }
+        SH
+        output, errors, status = Open3.capture3(shell, flags, command_flag, commands + script.sub("/sys/class/net", root), name, cidr)
+        assert status.success?, errors
+        assert_equal [
+          "set --origin-hint 99-kitchen-static ethernets.uplink={dhcp4: false, addresses: [10.37.129.10/24]}",
+          "apply",
+        ], output.lines.map(&:strip)
+      end
+    end
+
+    driver.stub(:guest_command, execute) do
+      driver.send(:configure_static_guest, "vm", "10.37.129.10/24", deadline)
+    end
   end
 
   it "rejects invalid static IPv4 settings before touching Parallels" do
