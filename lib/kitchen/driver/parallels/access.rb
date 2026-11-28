@@ -8,6 +8,18 @@ module Kitchen
 
       private
 
+      def winrm_loopback_host(volumes)
+        host = instance.transport[:hostname] || "127.0.0.1"
+        unless ["127.0.0.1", "::1"].include?(host)
+          raise ActionFailed, "Parallels WinRM requires transport.hostname to be a loopback address (127.0.0.1 or ::1)"
+        end
+        unless volumes[:folders].empty?
+          raise ActionFailed, "Parallels synced folders are unavailable with WinRM"
+        end
+
+        host
+      end
+
       def configure_ssh(state)
         transport = instance.transport
         if !config[:insert_key] || transport[:ssh_key] || transport[:password]

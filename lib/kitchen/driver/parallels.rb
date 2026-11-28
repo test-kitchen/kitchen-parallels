@@ -18,7 +18,7 @@ require_relative "parallels/volumes"
 
 module Kitchen
   module Driver
-    # Creates disposable Linux VMs using the local Parallels Desktop CLI.
+    # Creates disposable VMs using the local Parallels Desktop CLI.
     class Parallels < Base
       kitchen_driver_api_version 2
       plugin_version "0.1.0"
@@ -41,13 +41,20 @@ module Kitchen
       def create(state)
         validate_config
         volumes = volume_configuration
+        winrm = instance.transport[:name].to_s == "winrm"
+        winrm_host = winrm_loopback_host(volumes) if winrm
         prepare_state(state)
         vm = find_vm(state) || create_vm(state)
         state[:parallels_uuid] = vm.fetch("uuid")
         checkpoint(state)
         start_vm(vm, volumes, imported: state[:parallels_import])
-        state[:hostname] = wait_for_ip(state[:parallels_uuid])
-        configure_ssh(state)
+        guest_ip = wait_for_ip(state[:parallels_uuid])
+        state[:hostname] = winrm_host || guest_ip
+        if winrm
+          info("WinRM expects a loopback tunnel at #{winrm_host}:#{instance.transport[:port]} for Parallels guest #{guest_ip}")
+        else
+          configure_ssh(state)
+        end
         instance.transport.connection(state).wait_until_ready
         mount_shared_folders(state[:parallels_uuid], volumes[:folders])
       end

@@ -1,0 +1,31 @@
+---
+driver:
+  name: parallels
+  source_vm: <%= ENV.fetch("KITCHEN_PARALLELS_WINDOWS_VM").to_json %>
+
+transport:
+  name: winrm
+  winrm_transport: ssl
+  no_ssl_peer_verification: false
+  port: 15986
+  client_cert: <%= ENV.fetch("KITCHEN_WINRM_CLIENT_CERT").to_json %>
+  client_key: <%= ENV.fetch("KITCHEN_WINRM_CLIENT_KEY").to_json %>
+
+provisioner:
+  name: shell
+  command: Set-Content -Path (Join-Path $env:TEMP 'kitchen-parallels-smoke.txt') -Value 'converged'
+
+verifier:
+  name: shell
+  remote_exec: true
+  command: >-
+    $marker = Join-Path $env:TEMP 'kitchen-parallels-smoke.txt';
+    if ((Get-Content -LiteralPath $marker -ErrorAction Stop) -ne 'converged') { exit 1 }
+
+platforms:
+  - name: windows-11
+    os_type: windows
+    shell_type: powershell
+
+suites:
+  - name: smoke

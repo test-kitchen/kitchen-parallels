@@ -1,14 +1,15 @@
 # kitchen-parallels
 
-Run Test Kitchen against disposable Linux VMs on Parallels Desktop. The driver uses
-`prlctl` on the Mac and Kitchen's SSH transport to connect to the guest.
+Run Test Kitchen against disposable Linux and Windows VMs on Parallels Desktop.
+The driver uses `prlctl` on the Mac and Kitchen's SSH or WinRM transport.
 
 ## Requirements
 
 - Ruby 3.1 or newer and Test Kitchen 4.2 or newer.
 - Parallels Desktop with full CLI access in the current macOS user session.
-- A prepared Linux guest for the Mac's CPU architecture, with Parallels Tools,
-  shared networking, SSH and an account suitable for your provisioner.
+- A prepared guest for the Mac's CPU architecture, with Parallels Tools and
+  an account suitable for your provisioner. Linux uses shared networking and
+  SSH. See the Windows guest and tunnel requirements below.
 - Enough local disk space for a full copy per instance.
 
 Run one instance at a time from a base image that shares its DHCP client ID
@@ -72,10 +73,57 @@ bundle exec kitchen destroy
 ```
 
 The optional `driver.ip_timeout` sets how long the driver waits for a guest
-IPv4 address, in seconds. It defaults to 180. The SSH readiness timeout is
+IPv4 address, in seconds. It defaults to 180. The transport readiness timeout is
 configured separately with `transport.max_wait_until_ready`.
 The driver checks the address reported by Parallels Tools first and uses
 active Parallels DHCP leases for the VM's MAC address as a fallback.
+
+## Windows over WinRM
+
+Use a stopped Windows 11 source VM supported by your Parallels Desktop version
+and Mac architecture, with Parallels Tools, working guest IPv4 networking and
+a dedicated account authorised for WinRM. Prepare the source with a WinRM
+listener reachable on the guest's loopback interface. Block inbound WinRM on
+the guest's network interfaces. For the smoke example, use HTTPS on guest port
+5986, with a certificate trusted by the macOS Ruby installation and a subject
+alternative name matching `127.0.0.1`. Enable WinRM certificate authentication
+and map a dedicated client certificate to the guest account.
+
+Kitchen connects to `127.0.0.1` on the Mac by default when you select
+`transport.name: winrm`. The driver prints the clone's IPv4 address while
+waiting for WinRM. It skips Linux SSH key insertion and rejects enabled
+`driver.synced_folders` entries with WinRM. Use a separate local tunnel port
+for each running clone. If your shell configures HTTP proxies, include
+`127.0.0.1` in its proxy bypass list.
+
+1. From `examples/windows`, supply `KITCHEN_PARALLELS_WINDOWS_VM`,
+   `KITCHEN_WINRM_CLIENT_CERT` and `KITCHEN_WINRM_CLIENT_KEY` in the environment.
+   Use absolute paths to the PEM certificate and its private key.
+   Run `BUNDLE_GEMFILE=../../Gemfile bundle exec kitchen create`.
+2. Open an SSH tunnel in a second terminal using the clone IP printed by Kitchen.
+   The guest needs Windows OpenSSH Server, a trusted host key and a tunnel account
+   permitted to forward to guest loopback. For example:
+
+   ```sh
+   ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:15986:127.0.0.1:5986 tunnel-user@CLONE_IP
+   ```
+
+   If SSH reports that the port is occupied, use a free port and update
+   `transport.port` before retrying `kitchen create`.
+
+3. Keep the tunnel open and run the following from `examples/windows`.
+
+   ```sh
+   BUNDLE_GEMFILE=../../Gemfile bundle exec kitchen converge
+   BUNDLE_GEMFILE=../../Gemfile bundle exec kitchen verify
+   BUNDLE_GEMFILE=../../Gemfile bundle exec kitchen destroy
+   ```
+
+If creation times out before the tunnel is ready, retry `kitchen create` after
+the tunnel is up. The driver reuses the same clone. If converge or verify loses
+the connection, re-establish the tunnel to that clone and rerun the failed
+command. `kitchen destroy` also works after a failed WinRM connection. Close
+the tunnel once the clone is destroyed.
 
 ## Shared folders and disks
 
@@ -135,7 +183,7 @@ blank extra disks. These Vagrant features still need a separate implementation
 or a different driver:
 
 - Remote box lookup, downloads, automatic version checks and updates.
-- Other hypervisors, Windows and WinRM, port forwarding, bridged and private
+- Other hypervisors, automatic port forwarding, bridged and private
   network setup, and static IP configuration.
 - Linked clones and snapshots, VM packaging, Vagrantfile hooks, arbitrary
   provider customisation, Vagrant provisioning and guest environment settings.
