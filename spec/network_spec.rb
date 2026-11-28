@@ -76,6 +76,59 @@ describe Kitchen::Driver::Parallels do
     end
   end
 
+  it "retains cleanup state on inventory failures and destroys after Shared is confirmed absent" do
+    forward = { host_port: 22022, guest_port: 22 }
+    with_network_driver({ mode: "shared", forward: forward }, port_forward: forward) do |driver, state, vm|
+      token = state.fetch(:parallels_token)
+      state[:parallels_forward_attempted] = true
+      inventory = nil
+      commands = []
+      command = lambda do |*args|
+        commands << args
+        case args
+        when %w{prlsrvctl net list --json}
+          raise Kitchen::ActionFailed, "Inventory command failed" unless inventory
+
+          inventory
+        when ["prlctl", "stop", token, "--kill"], ["prlctl", "delete", token]
+          nil
+        else
+          flunk("Unexpected command: #{args.inspect}") unless args.take(2) == %w{prlctl list}
+          JSON.generate([vm])
+        end
+      end
+
+      driver.stub(:command, command) do
+        lock = Minitest::Mock.new
+        lock.expect(:flock, false, [File::LOCK_EX])
+        unavailable_lock = ->(*_args, &block) { block.call(lock) }
+        File.stub(:open, unavailable_lock) do
+          error = assert_raises(Kitchen::ActionFailed) { driver.destroy(state) }
+          assert_match(/Cannot lock/, error.message)
+        end
+        lock.verify
+        assert_empty commands
+        assert state[:parallels_forward_attempted]
+
+        [nil, "{", "[{}]", '[{"Network ID":"Shared","Type":"shared","NAT server":[]}]'].each do |output|
+          inventory = output
+          commands.clear
+          assert_raises(Kitchen::ActionFailed) { driver.destroy(state) }
+          assert state[:parallels_forward_attempted]
+          assert_equal [%w{prlsrvctl net list --json}], commands
+        end
+
+        inventory = '[{"Network ID":"Host-Only","Type":"host-only"}]'
+        error = assert_raises(Kitchen::ActionFailed) { driver.create(state) }
+        assert_match(/Shared network is unavailable/, error.message)
+        Dir.stub(:tmpdir, "/unused-tmpdir") { driver.destroy(state) }
+        assert_includes commands, ["prlctl", "delete", token]
+        refute state.key?(:parallels_forward_attempted)
+        assert File.file?(File.join(Etc.getpwuid(Process.uid).dir, ".kitchen-parallels-nat.lock"))
+      end
+    end
+  end
+
   def with_network_driver(network, **options)
     Dir.mktmpdir do |root|
       driver = Kitchen::Driver::Parallels.new(box: "fixture.box", insert_key: false, kitchen_root: root, **options)
@@ -91,7 +144,10 @@ describe Kitchen::Driver::Parallels do
       state = { parallels_token: token, parallels_uuid: token, parallels_import: true, parallels_network: network }
       vm = { "uuid" => token, "status" => "running", "ip_configured" => "10.37.129.10" }
 
-      driver.stub(:instance, instance) { yield driver, state, vm }
+      account = Struct.new(:dir).new(root)
+      Etc.stub(:getpwuid, account) do
+        driver.stub(:instance, instance) { yield driver, state, vm }
+      end
     end
   end
 end

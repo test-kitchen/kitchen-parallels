@@ -1,6 +1,8 @@
 # Copyright 2026 Dan Webb
 # SPDX-License-Identifier: Apache-2.0
 
+require "etc" unless defined?(Etc)
+
 module Kitchen
   module Driver
     module ParallelsNetwork
@@ -45,6 +47,7 @@ module Kitchen
       def install_port_forward(state)
         name, expected = port_forward_rule(state)
         with_shared_tcp_rules do |rules|
+          raise ActionFailed, "Parallels Shared network is unavailable" unless rules
           return if rules[name] == expected
 
           host_port = expected.fetch("source port")
@@ -64,7 +67,7 @@ module Kitchen
 
         name, expected = port_forward_rule(state)
         with_shared_tcp_rules do |rules|
-          if rules[name] == expected
+          if rules && rules[name] == expected
             command("prlsrvctl", "net", "set", "Shared", "--nat-tcp-del", name)
           end
           state.delete(:parallels_forward_attempted)
@@ -74,9 +77,10 @@ module Kitchen
 
       def with_shared_tcp_rules
         # Shared NAT is host-wide. Serialise Kitchen updates across this user's projects.
-        path = File.join(Dir.tmpdir, "kitchen-parallels-nat-#{Process.uid}.lock")
+        path = File.join(Etc.getpwuid(Process.uid).dir, ".kitchen-parallels-nat.lock")
         File.open(path, File::RDWR | File::CREAT | File::NOFOLLOW, 0o600) do |lock|
-          lock.flock(File::LOCK_EX)
+          raise ActionFailed, "Cannot lock the Parallels Shared network" unless lock.flock(File::LOCK_EX)
+
           yield shared_tcp_rules
         end
       rescue SystemCallError => e
@@ -94,10 +98,23 @@ module Kitchen
 
       def shared_tcp_rules
         networks = read_json(command("prlsrvctl", "net", "list", "--json"), "prlsrvctl net list")
-        shared = networks.find { |network| network["Network ID"] == "Shared" && network["Type"] == "shared" }
-        raise ActionFailed, "Parallels Shared network is unavailable" unless shared
+        valid = networks.is_a?(Array) && networks.all? do |network|
+          network.is_a?(Hash) && network["Network ID"].is_a?(String) && network["Type"].is_a?(String)
+        end
+        unless valid
+          raise ActionFailed, "Invalid network inventory from prlsrvctl net list"
+        end
 
-        shared.dig("NAT server", "TCP rules") || {}
+        shared = networks.find { |network| network["Network ID"] == "Shared" && network["Type"] == "shared" }
+        return unless shared
+
+        nat = shared.fetch("NAT server", {})
+        rules = nat.fetch("TCP rules", {}) if nat.is_a?(Hash)
+        unless rules.is_a?(Hash) && rules.values.all?(Hash)
+          raise ActionFailed, "Invalid Shared TCP rules from prlsrvctl net list"
+        end
+
+        rules
       end
     end
   end
