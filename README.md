@@ -9,7 +9,7 @@ Run Test Kitchen against disposable Linux VMs on Parallels Desktop. The driver u
 - Parallels Desktop with full CLI access in the current macOS user session.
 - A prepared Linux guest for the Mac's CPU architecture, with Parallels Tools,
   shared networking, SSH and an account suitable for your provisioner.
-- Enough local disk space for a full copy per instance.
+- Local disk space for each instance's VM files.
 
 Run one instance at a time from a base image that shares its DHCP client ID
 across copies. For concurrent instances, prepare the guest to obtain an address
@@ -62,8 +62,38 @@ must contain one top-level `.pvm` bundle and a `metadata.json` declaring
 into its local `.kitchen` directory and registers that copy in Parallels.
 
 To use an already registered VM, set `source_vm` to its name or UUID in place
-of `box`. Shut down the registered source first. Parallels creates a full
-clone and Kitchen boots the clone.
+of `box`. Shut down the registered source first. By default, Parallels creates
+a full clone and Kitchen boots the clone.
+
+### Linked clones from a snapshot
+
+Set `source_snapshot` to opt in to a linked clone. Use a stopped, registered
+source VM with self-contained disks and an existing snapshot taken while
+the guest was shut down. Run `prlctl snapshot-list <source_vm>` to find the
+snapshot UUID. The host needs a Parallels Desktop edition that supports linked
+clones.
+
+```yaml
+driver:
+  name: parallels
+  source_vm: ubuntu-base
+  source_snapshot: "{7b485669-5347-4592-809c-a9274908bc18}"
+```
+
+Use SSH credentials that work in the snapshot. A linked clone depends on the
+source VM bundle and snapshot for its lifetime. Keep both in place and leave
+the clone bundle in its Kitchen instance directory. Run `kitchen destroy`
+before switching between full and linked clones or choosing a different
+snapshot. Kitchen removes the clone and its files and leaves the source VM
+and snapshot intact.
+
+`source_snapshot` requires `source_vm`. To use a box, omit
+`source_snapshot` and let Kitchen import it, or register a disposable copy
+as the source and take its snapshot first. Parallels detaches external disks
+when creating the linked clone. If the guest needs an external disk to boot
+or run, prepare a self-contained source before taking the snapshot. If the
+installed edition lacks linked clone support, omit `source_snapshot` to
+make a full clone of the stopped VM.
 
 ```sh
 bundle exec kitchen create
@@ -137,7 +167,7 @@ or a different driver:
 - Remote box lookup, downloads, automatic version checks and updates.
 - Other hypervisors, Windows and WinRM, port forwarding, bridged and private
   network setup, and static IP configuration.
-- Linked clones and snapshots, VM packaging, Vagrantfile hooks, arbitrary
+- Snapshot restore, VM packaging, Vagrantfile hooks, arbitrary
   provider customisation, Vagrant provisioning and guest environment settings.
 - NFS, SMB and Vagrant rsync shared folders, host or guest tool management, and
   the Vagrant Chef cache options.

@@ -18,7 +18,7 @@ module Kitchen
 
         user = transport[:username]
         user = "vagrant" if user == "root" || user.nil?
-        path = Box::SshBootstrap.install(import_directory(state), runner: method(:command)) do |arguments|
+        path = Box::SshBootstrap.install(instance_directory(state), runner: method(:command)) do |arguments|
           guest_command(state.fetch(:parallels_uuid), "runuser", "-u", user, "--", "/bin/sh", *arguments)
         end
         state[:ssh_key] = path

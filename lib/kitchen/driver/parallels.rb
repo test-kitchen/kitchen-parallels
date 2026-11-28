@@ -24,6 +24,7 @@ module Kitchen
       plugin_version "0.1.0"
 
       default_config :source_vm
+      default_config :source_snapshot
       default_config :box
       default_config :box_manifest
       default_config :box_cache
@@ -75,6 +76,16 @@ module Kitchen
           raise ActionFailed, "Set exactly one of driver.source_vm or driver.box"
         end
 
+        snapshot = config[:source_snapshot]
+        unless snapshot.nil?
+          raise ActionFailed, "driver.source_snapshot requires driver.source_vm instead of driver.box" if config[:source_vm].nil?
+
+          uuid = /[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/i
+          unless snapshot.is_a?(String) && /\A(?:#{uuid}|\{#{uuid}\})\z/.match?(snapshot)
+            raise ActionFailed, "Set driver.source_snapshot to a snapshot UUID from prlctl snapshot-list"
+          end
+        end
+
         timeout = config[:ip_timeout]
         unless (timeout.is_a?(Integer) || timeout.is_a?(Float)) && timeout.finite? && timeout > 0
           raise ActionFailed, "driver.ip_timeout must be a positive number of seconds"
@@ -83,8 +94,12 @@ module Kitchen
 
       def prepare_state(state)
         importing = !config[:box].nil?
+        snapshot = config[:source_snapshot]&.delete("{}")&.downcase
         if state[:parallels_token] && state[:parallels_import] != importing
           raise ActionFailed, "The Parallels source type changed. Run kitchen destroy before creating a new instance."
+        end
+        if state[:parallels_token] && state[:parallels_snapshot] != snapshot
+          raise ActionFailed, "The Parallels source snapshot changed. Run kitchen destroy before creating a new instance."
         end
         return if state[:parallels_token]
 
@@ -92,6 +107,7 @@ module Kitchen
         # The name lets us recover if prlctl succeeds before the UUID is saved.
         state[:parallels_name] = "kitchen-#{instance.name}-#{state[:parallels_token]}"
         state[:parallels_import] = importing
+        state[:parallels_snapshot] = snapshot if snapshot
         state[:parallels_uuid] = state[:parallels_token] if importing
         checkpoint(state)
       end
@@ -111,13 +127,26 @@ module Kitchen
       end
 
       def find_vm(state)
-        vm_list.find do |vm|
+        vm = vm_list.find do |entry|
           if state[:parallels_uuid]
-            vm.fetch("uuid") == state[:parallels_uuid]
+            entry.fetch("uuid") == state[:parallels_uuid]
           else
-            vm.fetch("name") == state[:parallels_name]
+            entry.fetch("name") == state[:parallels_name]
           end
         end
+        verify_linked_clone_directory(vm, state) if vm && state[:parallels_snapshot]
+        vm
+      end
+
+      def verify_linked_clone_directory(vm, state)
+        directory = instance_directory(state)
+        uuid = vm.fetch("uuid")
+        info = read_json(prlctl("list", uuid, "--info", "--json"), "prlctl list --info").first
+        home = info&.fetch("Home", nil)
+        return if home && File.exist?(home) && File.directory?(directory) && !File.symlink?(directory) &&
+          File.dirname(File.realpath(home)) == File.realpath(directory)
+
+        raise ActionFailed, "Cannot verify ownership of Parallels VM #{uuid}. Expected its bundle in #{directory}."
       end
 
       def clone_source(state)
@@ -128,7 +157,21 @@ module Kitchen
           raise ActionFailed, "Shut down the Parallels source VM #{source.inspect} before cloning it"
         end
 
-        prlctl("clone", vm.fetch("uuid"), "--name", state[:parallels_name])
+        if config[:source_snapshot]
+          clone_snapshot(vm.fetch("uuid"), state)
+        else
+          prlctl("clone", vm.fetch("uuid"), "--name", state[:parallels_name])
+        end
+      end
+
+      def clone_snapshot(uuid, state)
+        snapshot = config[:source_snapshot]
+        directory = prepare_instance_directory(state)
+        prlctl("clone", uuid, "--name", state[:parallels_name], "--linked", "--id", snapshot,
+          "--dst", directory, "--detach-external-hdd", "yes")
+      rescue ActionFailed => e
+        raise ActionFailed, "Could not create a Parallels linked clone from snapshot #{snapshot.inspect}. " \
+          "Check that it belongs to the stopped source VM and that your Parallels edition supports linked clones. #{e.message}"
       end
 
       def import_box(state)
@@ -138,9 +181,7 @@ module Kitchen
           raise ActionFailed, "driver.box must point to a local Parallels .pvm bundle or .box archive: #{source}"
         end
 
-        remove_instance_directory(state)
-        directory = import_directory(state)
-        FileUtils.mkdir_p(directory, mode: 0o700)
+        directory = prepare_instance_directory(state)
         bundle = if File.directory?(source)
                    destination = File.join(directory, File.basename(source))
                    command("/usr/bin/ditto", source, destination)
@@ -166,7 +207,14 @@ module Kitchen
         raise ActionFailed, e.message
       end
 
-      def import_directory(state)
+      def prepare_instance_directory(state)
+        remove_instance_directory(state)
+        directory = instance_directory(state)
+        FileUtils.mkdir_p(directory, mode: 0o700)
+        directory
+      end
+
+      def instance_directory(state)
         token = state.fetch(:parallels_token)
         unless /\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z/.match?(token)
           raise ActionFailed, "Invalid Parallels instance ID in Kitchen state"
@@ -176,7 +224,7 @@ module Kitchen
       end
 
       def remove_instance_directory(state)
-        directory = import_directory(state)
+        directory = instance_directory(state)
         FileUtils.remove_entry_secure(directory) if File.exist?(directory)
       end
 

@@ -59,6 +59,90 @@ describe Kitchen::Driver::Parallels do
     assert_raises(Kitchen::ActionFailed) { invalid_disk.send(:volume_configuration) }
   end
 
+  it "recovers and destroys only the linked clone after registration is interrupted" do
+    Dir.mktmpdir do |root|
+      snapshot = "7b485669-5347-4592-809c-a9274908bc18"
+      source = { "name" => "base", "uuid" => "source-uuid", "status" => "stopped" }
+      clone = nil
+      clone_home = nil
+      reported_home = nil
+      connection = Object.new
+      def connection.wait_until_ready; end
+      transport = Object.new
+      transport.define_singleton_method(:connection) { |_state| connection }
+      driver = Kitchen::Driver::Parallels.new(kitchen_root: root, source_vm: "base", source_snapshot: snapshot)
+      instance = Struct.new(:name, :transport, :logger).new("default-linux", transport, Kitchen.logger)
+      state = {}
+      commands = lambda do |*args|
+        if args == %w{prlctl list clone-uuid --info --json}
+          next [{ "Home" => reported_home }].to_json
+        end
+
+        case args.first(2)
+        when %w{prlctl list}
+          [source, clone].compact.to_json
+        when %w{prlctl clone}
+          directory = File.join(root, ".kitchen", "parallels-#{state.fetch(:parallels_token)}")
+          _(args).must_equal ["prlctl", "clone", "source-uuid", "--name", state.fetch(:parallels_name),
+            "--linked", "--id", snapshot, "--dst", directory, "--detach-external-hdd", "yes"]
+          assert File.directory?(directory)
+          clone_home = File.join(directory, "clone.pvm")
+          FileUtils.mkdir_p(clone_home)
+          clone = { "name" => state.fetch(:parallels_name), "uuid" => "clone-uuid",
+                    "status" => "running", "ip_configured" => "10.0.0.2" }
+          raise Kitchen::ActionFailed, "interrupted after registration"
+        when %w{prlctl stop}
+          _(args.drop(2)).must_equal ["clone-uuid", "--kill"]
+        when %w{prlctl delete}
+          _(args.drop(2)).must_equal ["clone-uuid"]
+          clone = nil
+        else
+          flunk "Unexpected command: #{args.inspect}"
+        end
+      end
+      driver.stub(:instance, instance) do
+        driver.stub(:command, commands) do
+          error = assert_raises(Kitchen::ActionFailed) { driver.create(state) }
+          assert_includes error.message, "interrupted after registration"
+          state = Kitchen::StateFile.new(root, "default-linux").read
+          reported_home = File.join(root, "unrelated.pvm")
+          FileUtils.mkdir_p(reported_home)
+          assert_includes assert_raises(Kitchen::ActionFailed) { driver.destroy(state) }.message, "Cannot verify ownership"
+          directory = File.dirname(clone_home)
+          File.rename(directory, "#{directory}.saved")
+          File.symlink(root, directory)
+          assert_includes assert_raises(Kitchen::ActionFailed) { driver.destroy(state) }.message, "Cannot verify ownership"
+          File.unlink(directory)
+          File.rename("#{directory}.saved", directory)
+          reported_home = clone_home
+          driver.create(state)
+          _(state.values_at(:parallels_uuid, :hostname)).must_equal ["clone-uuid", "10.0.0.2"]
+          driver.destroy(state)
+          assert_nil clone
+          assert_empty Dir.glob(File.join(root, ".kitchen", "parallels-*"))
+        end
+      end
+    end
+  end
+
+  it "rejects snapshots with a box and requires a snapshot UUID with a registered source" do
+    box = Kitchen::Driver::Parallels.new(box: "base.box", source_snapshot: "7b485669-5347-4592-809c-a9274908bc18")
+    source = Kitchen::Driver::Parallels.new(source_vm: "base", source_snapshot: "snapshot-name")
+    state = {}
+
+    assert_includes assert_raises(Kitchen::ActionFailed) { box.create(state) }.message, "requires driver.source_vm"
+    assert_includes assert_raises(Kitchen::ActionFailed) { source.create(state) }.message, "snapshot UUID"
+    assert_empty state
+  end
+
+  it "requires teardown before switching an existing full clone to a linked clone" do
+    driver = Kitchen::Driver::Parallels.new(source_vm: "base", source_snapshot: "7b485669-5347-4592-809c-a9274908bc18")
+    existing = { parallels_token: "existing", parallels_import: false }
+
+    error = assert_raises(Kitchen::ActionFailed) { driver.create(existing) }
+    assert_includes error.message, "Run kitchen destroy"
+  end
+
   it "keeps the box path in the platform's driver config" do
     data = Kitchen::DataMunger.new({
       driver: { name: "parallels" },
