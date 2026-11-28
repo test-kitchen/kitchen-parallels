@@ -80,6 +80,13 @@ active Parallels DHCP leases for the VM's MAC address as a fallback.
 
 ## Windows over WinRM
 
+On Apple silicon, install Windows 11 Pro from the
+[Microsoft Arm64 ISO](https://www.microsoft.com/en-us/software-download/windows11arm64)
+using the Windows 11 VM profile and shared networking. Disable host folder
+sharing for the source, install Parallels Tools, and use dedicated local test
+credentials. Detach the ISO and shut Windows down before using the VM as a
+clone source. Keep the source and all private keys local.
+
 Use a stopped Windows 11 source VM supported by your Parallels Desktop version
 and Mac architecture, with Parallels Tools, working guest IPv4 networking and
 a dedicated account authorised for WinRM. Prepare the source with a WinRM
@@ -93,13 +100,18 @@ Kitchen connects to `127.0.0.1` on the Mac by default when you select
 `transport.name: winrm`. The driver prints the clone's IPv4 address while
 waiting for WinRM. It skips Linux SSH key insertion and rejects enabled
 `driver.synced_folders` entries with WinRM. Use a separate local tunnel port
-for each running clone. If your shell configures HTTP proxies, include
+for each running clone. During create the driver writes a temporary marker
+through Parallels Tools in the selected clone and checks for it over WinRM.
+The WinRM account needs read access to the marker in ProgramData. If your shell configures HTTP proxies, include
 `127.0.0.1` in its proxy bypass list.
 
 1. From `examples/windows`, supply `KITCHEN_PARALLELS_WINDOWS_VM`,
    `KITCHEN_WINRM_CLIENT_CERT` and `KITCHEN_WINRM_CLIENT_KEY` in the environment.
-   Use absolute paths to the PEM certificate and its private key.
+   Use absolute paths to the PEM certificate and its private key. Keep
+   `transport.no_ssl_peer_verification: false` explicit in your Kitchen
+   configuration to verify the server certificate.
    Run `BUNDLE_GEMFILE=../../Gemfile bundle exec kitchen create`.
+
 2. Open an SSH tunnel in a second terminal using the clone IP printed by Kitchen.
    The guest needs Windows OpenSSH Server, a trusted host key and a tunnel account
    permitted to forward to guest loopback. For example:

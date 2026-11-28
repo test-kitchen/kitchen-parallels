@@ -35,6 +35,10 @@ describe "Parallels Windows instances" do
       clone = { "uuid" => "clone", "status" => "stopped", "ip_configured" => "10.37.129.2" }
       vms = [source]
       commands = []
+      markers = []
+      clone_files = []
+      other_clone_files = []
+      tunnel_files = other_clone_files
       shellout = lambda do |*arguments, **_options|
         commands << arguments
         case arguments[0, 2]
@@ -46,6 +50,21 @@ describe "Parallels Windows instances" do
           vms << clone
         when %w{prlctl start}
           clone["status"] = "running"
+        when %w{prlctl exec}
+          assert_equal "clone", arguments.fetch(2)
+          assert_equal %w{powershell.exe -NoProfile -NonInteractive -EncodedCommand}, arguments[3, 4]
+          encoded = arguments.fetch(7)
+          script = encoded.unpack1("m0").force_encoding("UTF-16LE").encode("UTF-8")
+          marker = readiness_marker(script)
+          if script.start_with?("New-Item")
+            markers << marker
+            clone_files << marker
+          elsif script.start_with?("Remove-Item")
+            assert_includes clone_files, marker
+            clone_files.delete(marker)
+          else
+            flunk "Unexpected guest command: #{script}"
+          end
         when %w{prlctl delete}
           vms.delete(clone)
         end
@@ -58,7 +77,16 @@ describe "Parallels Windows instances" do
       connection.define_singleton_method(:wait_until_ready) do
         raise Kitchen::Transport::WinrmFailed, "Tunnel unavailable" if endpoints.one?
       end
-      connection.define_singleton_method(:execute) { |script| scripts << script }
+      marker_name = method(:readiness_marker)
+      connection.define_singleton_method(:execute) do |script|
+        if script&.include?("Test-Path")
+          unless tunnel_files.include?(marker_name.call(script))
+            raise Kitchen::Transport::WinrmFailed.new("The clone marker is missing", 42)
+          end
+        else
+          scripts << script
+        end
+      end
       connection.define_singleton_method(:upload) { |*| }
       connection.define_singleton_method(:close) {}
       connect = lambda do |options, &block|
@@ -71,6 +99,10 @@ describe "Parallels Windows instances" do
         Kitchen::Transport::Winrm::Connection.stub(:new, connect) do
           assert_raises(Kitchen::ActionFailed) { kitchen_instance(root).create }
           if retry_create
+            other_clone_files.concat(markers)
+            failure = assert_raises(Kitchen::InstanceFailure) { kitchen_instance(root).create }
+            assert_includes failure.cause.message, "tunnel did not reach Parallels clone"
+            tunnel_files = clone_files
             kitchen_instance(root).create
             kitchen_instance(root).verify
           end
@@ -78,16 +110,21 @@ describe "Parallels Windows instances" do
         end
       end
 
-      assert_equal ["https://127.0.0.1:15986/wsman"] * (retry_create ? 3 : 1), endpoints
+      assert_equal ["https://127.0.0.1:15986/wsman"] * (retry_create ? 4 : 1), endpoints
       if retry_create
         assert(scripts.any? { |script| script&.include?("converged") })
         assert_includes scripts, "Write-Output 'verified'"
       end
       assert_equal(1, commands.count { |command| command[1] == "clone" })
       assert_equal([%w{prlctl delete clone}], commands.select { |command| command[1] == "delete" })
-      refute(commands.any? { |command| command[1] == "exec" })
+      assert_empty clone_files
+      assert_equal(retry_create ? 3 : 1, markers.uniq.size)
       assert_equal [source], vms
     end
+  end
+
+  def readiness_marker(script)
+    script[/kitchen-winrm-[0-9a-f-]+/] || flunk("Missing clone marker: #{script}")
   end
 
   it "rejects a non-loopback WinRM endpoint before touching Parallels" do

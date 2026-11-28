@@ -20,6 +20,35 @@ module Kitchen
         host
       end
 
+      def wait_for_winrm(state)
+        uuid = state.fetch(:parallels_uuid)
+        # Create a fresh marker directly in this clone through Parallels Tools.
+        marker = %{Join-Path $env:ProgramData "kitchen-winrm-#{SecureRandom.uuid}"}
+        windows_guest_command(uuid, "New-Item -ItemType File -Path (#{marker}) -ErrorAction Stop | Out-Null")
+        begin
+          connection = instance.transport.connection(state)
+          connection.wait_until_ready
+          connection.execute("if (-not (Test-Path -LiteralPath (#{marker}) -PathType Leaf)) { exit 42 }")
+        rescue Transport::WinrmFailed => e
+          raise unless e.exit_code == 42
+
+          raise ActionFailed, "The WinRM tunnel did not reach Parallels clone #{uuid}. Reconnect it to this clone and retry kitchen create."
+        ensure
+          remove_winrm_marker(uuid, marker)
+        end
+      end
+
+      def remove_winrm_marker(uuid, marker)
+        windows_guest_command(uuid, "Remove-Item -LiteralPath (#{marker}) -ErrorAction Stop")
+      rescue ActionFailed => e
+        debug("Could not remove the WinRM readiness marker from Parallels clone #{uuid}: #{e.message}")
+      end
+
+      def windows_guest_command(uuid, script)
+        encoded = [script.encode("UTF-16LE")].pack("m0")
+        execute_guest_command(uuid, "powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded)
+      end
+
       def configure_ssh(state)
         transport = instance.transport
         if !config[:insert_key] || transport[:ssh_key] || transport[:password]
@@ -57,9 +86,13 @@ module Kitchen
       end
 
       def guest_command(uuid, *arguments)
+        execute_guest_command(uuid, Shellwords.join(arguments))
+      end
+
+      def execute_guest_command(uuid, *arguments)
         deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 30
         begin
-          prlctl("exec", uuid, Shellwords.join(arguments))
+          prlctl("exec", uuid, *arguments)
         rescue ActionFailed => e
           raise unless e.message.include?("Unable to open new session in this virtual machine") &&
             Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline

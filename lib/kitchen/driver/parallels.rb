@@ -52,10 +52,11 @@ module Kitchen
         state[:hostname] = winrm_host || guest_ip
         if winrm
           info("WinRM expects a loopback tunnel at #{winrm_host}:#{instance.transport[:port]} for Parallels guest #{guest_ip}")
+          wait_for_winrm(state)
         else
           configure_ssh(state)
+          instance.transport.connection(state).wait_until_ready
         end
-        instance.transport.connection(state).wait_until_ready
         mount_shared_folders(state[:parallels_uuid], volumes[:folders])
       end
 
