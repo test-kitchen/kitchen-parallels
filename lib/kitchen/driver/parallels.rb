@@ -15,6 +15,7 @@ require "shellwords" unless defined?(Shellwords)
 require "time" unless defined?(Time.zone_offset)
 require "tmpdir" unless defined?(Dir.mktmpdir)
 require_relative "parallels/access"
+require_relative "parallels/package"
 require_relative "parallels/volumes"
 
 module Kitchen
@@ -25,6 +26,7 @@ module Kitchen
       plugin_version "0.1.0"
 
       default_config :source_vm
+      default_config :package_source_sha256
       default_config :box
       default_config :box_manifest
       default_config :box_cache
@@ -36,6 +38,7 @@ module Kitchen
       default_config :additional_disks, []
 
       include ParallelsAccess
+      include ParallelsPackage
       include ParallelsVolumes
       include Box::Source
 
@@ -161,6 +164,7 @@ module Kitchen
         # The name lets us recover if prlctl succeeds before the UUID is saved.
         state[:parallels_name] = "kitchen-#{instance.name}-#{state[:parallels_token]}"
         state[:parallels_import] = importing
+        state[:parallels_key_injected] = false
         state[:parallels_uuid] = state[:parallels_token] if importing
         checkpoint(state)
       end
@@ -206,8 +210,13 @@ module Kitchen
       end
 
       def import_box(state)
+        checkpoint(state) if state.delete(:parallels_package_source_sha256)
         source = box_source("parallels", state) { checkpoint(state) }
         validate_box_path(source)
+
+        if config[:package_source_sha256] && File.extname(source) != ".box"
+          raise ActionFailed, "driver.package_source_sha256 requires a .box archive"
+        end
 
         remove_instance_directory(state)
         directory = import_directory(state)
@@ -217,13 +226,33 @@ module Kitchen
                    command("/usr/bin/ditto", source, destination)
                    destination
                  else
-                   unpack_box(source, directory)
+                   import_archive(source, directory)
                  end
         unless File.file?(File.join(bundle, "config.pvs"))
           raise ActionFailed, "Parallels bundle is missing config.pvs: #{bundle}"
         end
 
         prlctl("register", bundle, "--uuid", state[:parallels_uuid], "--name", state[:parallels_name])
+        if config[:package_source_sha256]
+          prlctl("set", state[:parallels_uuid], "--sync-ssh-ids", "off")
+          state[:parallels_package_source_sha256] = config[:package_source_sha256]
+        end
+      end
+
+      def import_archive(source, directory)
+        expected = config[:package_source_sha256]
+        return unpack_box(source, directory) unless expected
+
+        # Extract the same private copy whose bytes were verified.
+        Dir.mktmpdir("source-", directory) do |staging|
+          archive = File.join(staging, "source.box")
+          FileUtils.cp(source, archive)
+          unless expected.is_a?(String) && Digest::SHA256.file(archive).hexdigest == expected
+            raise ActionFailed, "Parallels source archive does not match driver.package_source_sha256"
+          end
+
+          unpack_box(archive, directory)
+        end
       end
 
       def unpack_box(source, directory)

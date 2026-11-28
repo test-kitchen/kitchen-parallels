@@ -77,6 +77,25 @@ configured separately with `transport.max_wait_until_ready`.
 The driver checks the address reported by Parallels Tools first and uses
 active Parallels DHCP leases for the VM's MAC address as a fallback.
 
+## Package a stopped instance
+
+Shut down the guest without destroying the Kitchen instance, then run
+`kitchen package INSTANCE`. Kitchen writes `INSTANCE.box` in the project root
+and leaves the source VM registered and stopped. Use the resulting file as
+`driver.box` in another instance. An existing output file is preserved.
+
+Create a fresh instance from a reviewed `.box` archive that contains no
+Kitchen-injected SSH keys. Set `driver.package_source_sha256` to the SHA-256
+digest of that specific archive before creating the instance, set
+`driver.insert_key: false`, and supply your own transport credentials.
+Kitchen checks the archive against the digest during import. Inspect the
+base guest for inherited credentials before approving it. Existing instances,
+registered `source_vm` clones, and direct `.pvm` imports lack this import record.
+
+The package retains guest files and credentials you add. Eject optical
+images completely and keep virtual hard disks inside the VM bundle.
+Kitchen removes custom host shares and disables host sharing on the export clone.
+
 ## Shared folders and disks
 
 Add the options under the global driver to share them across platforms, or
