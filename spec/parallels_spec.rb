@@ -182,6 +182,54 @@ describe Kitchen::Driver::Parallels do
     _(Kitchen::Driver::Parallels.new(box: "bento.box", insert_key: false)[:insert_key]).must_equal false
   end
 
+  it "uses transport credentials without bootstrapping and discards only generated state" do
+    [{ ssh_key: "/explicit/key" }, { password: "fixture-password" }, {}].each do |transport|
+      options = { box: "fixture.box" }
+      options[:insert_key] = false if transport.empty?
+      configured = Kitchen::Driver::Parallels.new(**options)
+      instance = Struct.new(:transport).new(transport)
+      generated = {
+        hostname: "10.211.55.3", ssh_key: "/generated/key", username: "vagrant",
+        parallels_generated_key: true, parallels_generated_user: true
+      }
+      existing = { ssh_key: "/previous/key", username: "custom" }
+      original = existing.dup
+      no_install = ->(*) { flunk("Unexpected SSH key bootstrap") }
+
+      configured.stub(:instance, instance) do
+        Kitchen::Box::SshBootstrap.stub(:install, no_install) do
+          configured.send(:configure_ssh, generated)
+          configured.send(:configure_ssh, existing)
+        end
+      end
+
+      assert_equal({ hostname: "10.211.55.3" }, generated)
+      assert_equal original, existing
+    end
+  end
+
+  it "leaves SSH connection state untouched when key installation fails" do
+    Dir.mktmpdir do |root|
+      configured = Kitchen::Driver::Parallels.new(box: "fixture.box", kitchen_root: root)
+      instance = Struct.new(:name, :transport).new("bootstrap", { username: "vagrant" })
+      state = { hostname: "10.211.55.3" }
+      original = state.dup
+      failed_install = ->(*) { raise Kitchen::ActionFailed, "SSH bootstrap failed" }
+
+      configured.stub(:instance, instance) do
+        configured.stub(:import_directory, "/fixture") do
+          Kitchen::Box::SshBootstrap.stub(:install, failed_install) do
+            error = assert_raises(Kitchen::ActionFailed) { configured.send(:configure_ssh, state) }
+            assert_equal "SSH bootstrap failed", error.message
+          end
+        end
+      end
+
+      assert_equal original.merge(parallels_key_injected: true), state
+      assert_equal state, Kitchen::StateFile.new(root, instance.name).read
+    end
+  end
+
   it "replaces both public Vagrant keys and preserves unrelated keys on a retry" do
     access = Kitchen::Box::SshBootstrap
     rsa, ed = access::INSECURE_RSA, access::INSECURE_ED25519

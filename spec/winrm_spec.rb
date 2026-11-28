@@ -8,9 +8,9 @@ require "kitchen/driver/parallels"
 require "kitchen/transport/winrm"
 
 describe "Parallels Windows instances" do
-  def kitchen_instance(root, hostname: nil)
+  def kitchen_instance(root, hostname: nil, **network)
     config = {
-      driver: { name: "parallels", source_vm: "windows-template", insert_key: true },
+      driver: { name: "parallels", source_vm: "windows-template", insert_key: true, **network },
       platforms: [{ name: "windows-11", os_type: "windows", shell_type: "powershell" }],
       transport: { name: "winrm", hostname: hostname, port: 15986, winrm_transport: "ssl" },
       provisioner: { name: "shell", command: "Write-Output 'converged'" },
@@ -132,6 +132,22 @@ describe "Parallels Windows instances" do
       unexpected_command = ->(*) { flunk "Parallels was called before endpoint validation" }
       Mixlib::ShellOut.stub(:new, unexpected_command) do
         assert_raises(Kitchen::InstanceFailure) { kitchen_instance(root, hostname: "192.0.2.10").create }
+      end
+    end
+  end
+
+  it "rejects Linux-only network options on WinRM before touching Parallels" do
+    Dir.mktmpdir do |root|
+      unexpected_command = ->(*) { flunk "Parallels was called before network validation" }
+      Mixlib::ShellOut.stub(:new, unexpected_command) do
+        [
+          { network_mode: "shared", static_ip: "192.0.2.10/24" },
+          { port_forward: { guest_port: 5986, host_port: 15986 } },
+          { network_mode: "bridged", insert_key: false },
+        ].each do |network|
+          error = assert_raises(Kitchen::InstanceFailure) { kitchen_instance(root, **network).create }
+          assert_includes error.cause.message, "Parallels WinRM supports inherited, shared or host-only networking"
+        end
       end
     end
   end

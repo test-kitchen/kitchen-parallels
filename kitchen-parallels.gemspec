@@ -11,7 +11,9 @@ Gem::Specification.new do |gem|
   gem.summary = "Test Kitchen driver for Parallels Desktop"
   gem.license = "Apache-2.0"
   gem.homepage = "https://kitchen.ci/"
-  gem.files = Dir.chdir(__dir__) { Dir["lib/**/*.rb", "README.md", "LICENSE", "NOTICE"] }
+  gem.files = Dir.chdir(__dir__) { Dir["lib/**/*.rb", "exe/kitchen-parallels", "README.md", "LICENSE", "NOTICE"] }
+  gem.bindir = "exe"
+  gem.executables = ["kitchen-parallels"]
   gem.require_paths = ["lib"]
   gem.required_ruby_version = ">= 3.1"
   gem.add_dependency "mixlib-shellout", ">= 3.0", "< 4.0"
