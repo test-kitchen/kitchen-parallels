@@ -80,7 +80,9 @@ active Parallels DHCP leases for the VM's MAC address as a fallback.
 Set `driver.cpus` for the number of virtual processors and `driver.memory`
 for the memory in megabytes. Both accept positive integers. You can set them
 independently, and the VM keeps the source image's setting for each option
-you omit.
+you omit. If an imported image has a saved session and you specify either
+option, Kitchen discards the imported copy’s saved session and boots it
+with the requested hardware.
 
 ```yaml
 driver:

@@ -27,6 +27,54 @@ describe Kitchen::Driver::Parallels do
     _(intercept_vm_create.last(2).first).must_equal defaults
   end
 
+  it "cold boots a freshly imported suspended VM with hardware overrides and resumes it on later creates" do
+    Dir.mktmpdir do |root|
+      path = File.join(root, "kitchen.yml")
+      box = File.join(root, "source.pvm")
+      FileUtils.mkdir_p(box)
+      File.write(File.join(box, "config.pvs"), "")
+      File.write(path, YAML.dump({
+        "driver" => { "name" => "parallels", "box" => box, "cpus" => 3 },
+        "platforms" => [{ "name" => "ubuntu" }],
+        "suites" => [{ "name" => "default" }],
+      }))
+      loader = Kitchen::Loader::YAML.new(project_config: path, process_local: false, process_global: false)
+      instance = Kitchen::Config.new(loader: loader, kitchen_root: root, log_level: :error).instances.first
+
+      commands = []
+      vm = nil
+      run = lambda do |*args|
+        commands << args
+        case args.first
+        when "list"
+          args.include?("--info") ? "[{}]" : JSON.generate([vm].compact)
+        when "register"
+          vm = { uuid: args[args.index("--uuid") + 1], name: args.last, status: "suspended" }
+        end
+      end
+      copy_bundle = ->(_program, source, destination) { FileUtils.cp_r(source, destination) }
+      instance.driver.stub(:command, copy_bundle) do
+        instance.driver.stub(:prlctl, run) do
+          instance.driver.stub(:wait_for_ip, ->(*) { raise Kitchen::ActionFailed, "boot intercepted" }) do
+            2.times do
+              error = assert_raises(Kitchen::InstanceFailure) { instance.create }
+              _(error.cause.message).must_equal "boot intercepted"
+            end
+          end
+        end
+      end
+
+      uuid = vm.fetch(:uuid)
+      power_and_settings = commands.select { |command| %w{stop set start resume}.include?(command.first) }
+      _(power_and_settings).must_equal [
+        ["stop", uuid, "--drop-state"],
+        ["set", uuid, *%w{--startup-view headless --shf-host off --smart-mount off --cpus 3}],
+        ["start", uuid],
+        ["resume", uuid],
+      ]
+    end
+  end
+
   it "rejects invalid hardware values before invoking Parallels" do
     %i{cpus memory}.each do |key|
       [0, -1, 1.5, true, "2"].each do |value|
