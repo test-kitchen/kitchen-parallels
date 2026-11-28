@@ -99,8 +99,10 @@ and snapshot intact.
 
 Linked clones require Test Kitchen with the public
 `Driver::Base#with_instance_lifecycle` hook, including when tearing down
-previously saved linked state. Test Kitchen 4.2.1 still supports full clones
-and box imports.
+previously saved linked state. Test Kitchen 4.2.1 supports full clones and
+box imports in projects without saved linked state. Kitchen loads all instances
+before filtering by name, so keep using the hook-enabled version for the whole
+project until all linked clones have been destroyed.
 
 With a hook-enabled core, the driver locks each instance across action
 selection, lifecycle hooks, and state changes. Use the same hook-enabled

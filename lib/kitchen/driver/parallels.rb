@@ -62,7 +62,7 @@ module Kitchen
         begin
           with_lifecycle_lock(lock_path) { yield }
         ensure
-          held_locks.pop
+          held_locks.delete(lock_path)
         end
       end
 
