@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.0](https://github.com/test-kitchen/kitchen-parallels/compare/v0.1.0...v0.2.0) (2026-11-28)
+
+
+### Features
+
+* configure Parallels CPU and memory ([#20](https://github.com/test-kitchen/kitchen-parallels/issues/20)) ([53e3830](https://github.com/test-kitchen/kitchen-parallels/commit/53e383016747f812a3926aad9564d9afc765de44))
+* configure Parallels VM networking ([#25](https://github.com/test-kitchen/kitchen-parallels/issues/25)) ([e935537](https://github.com/test-kitchen/kitchen-parallels/commit/e9355372151db831912381baf2f8cf6768e41bae))
+* package stopped Parallels instances ([#22](https://github.com/test-kitchen/kitchen-parallels/issues/22)) ([141d4ad](https://github.com/test-kitchen/kitchen-parallels/commit/141d4adf61a75803fc6e78b072fac1cec281f3c2))
+* report Parallels VM status and diagnostics ([#19](https://github.com/test-kitchen/kitchen-parallels/issues/19)) ([85e8650](https://github.com/test-kitchen/kitchen-parallels/commit/85e8650b4bac0c048deaa86c09b8d1da0cf936ad))
+* restore Parallels VM snapshots ([#24](https://github.com/test-kitchen/kitchen-parallels/issues/24)) ([1780011](https://github.com/test-kitchen/kitchen-parallels/commit/1780011338c6e4864b2746de504fd5ad66b0afec))
+
 ## 0.1.0 (2026-11-26)
 
 
