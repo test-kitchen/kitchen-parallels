@@ -77,6 +77,21 @@ configured separately with `transport.max_wait_until_ready`.
 The driver checks the address reported by Parallels Tools first and uses
 active Parallels DHCP leases for the VM's MAC address as a fallback.
 
+## Package a stopped instance
+
+Shut down the guest without destroying the Kitchen instance, then run
+`kitchen package INSTANCE`. Kitchen writes `INSTANCE.box` in the project root
+and leaves the source VM registered and stopped. Use the resulting file as
+`driver.box` in another instance. An existing output file is preserved.
+
+Use a fresh instance with `driver.insert_key: false` and supply your own
+transport credentials when preparing a package. Packaging refuses instances
+with evidence of Kitchen-injected SSH access because the driver cannot safely
+remove that key from a stopped guest. Instances created before the driver
+tracked SSH injection history also require recreation. Guest files and
+credentials you add yourself are retained, so prepare the guest before packaging it. Disconnect
+optical media and keep virtual hard disks inside the VM bundle.
+
 ## Shared folders and disks
 
 Add the options under the global driver to share them across platforms, or

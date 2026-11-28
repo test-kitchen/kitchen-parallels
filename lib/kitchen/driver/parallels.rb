@@ -14,6 +14,7 @@ require "securerandom" unless defined?(SecureRandom)
 require "shellwords" unless defined?(Shellwords)
 require "tmpdir" unless defined?(Dir.mktmpdir)
 require_relative "parallels/access"
+require_relative "parallels/package"
 require_relative "parallels/volumes"
 
 module Kitchen
@@ -35,6 +36,7 @@ module Kitchen
       default_config :additional_disks, []
 
       include ParallelsAccess
+      include ParallelsPackage
       include ParallelsVolumes
       include Box::Source
 
@@ -92,6 +94,7 @@ module Kitchen
         # The name lets us recover if prlctl succeeds before the UUID is saved.
         state[:parallels_name] = "kitchen-#{instance.name}-#{state[:parallels_token]}"
         state[:parallels_import] = importing
+        state[:parallels_key_injected] = false
         state[:parallels_uuid] = state[:parallels_token] if importing
         checkpoint(state)
       end
