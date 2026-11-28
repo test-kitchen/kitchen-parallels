@@ -155,6 +155,37 @@ the connection, re-establish the tunnel to that clone and rerun the failed
 command. `kitchen destroy` also works after a failed WinRM connection. Close
 the tunnel once the clone is destroyed.
 
+### Live Windows CI
+
+The live job needs an isolated Apple silicon macOS runner with Parallels
+installed and the label `kitchen-parallels-winrm` in the
+`kitchen-windows-winrm` runner group. Restrict the group to this repository
+and its live workflow on trusted branches. The workflow does not run on pull
+requests. Configure the `windows-winrm-ci` environment for the trusted
+branches and set the repository variable `KITCHEN_WINDOWS_CI_ENABLED=true`
+after the runner and environment are ready.
+
+Set environment variables `KITCHEN_WINDOWS_BOX_URL` and
+`KITCHEN_WINDOWS_BOX_SHA256` to a trusted archive and its independently
+verified SHA-256. The script checks the archive before passing it to Kitchen,
+checks the Windows ARM64 architecture in PowerShell, and destroys the guest
+after either outcome. Keep the runner isolated from production networks and
+credentials.
+
+The Vagrant Cloud candidate is the
+[Windows 11 ARM64 Parallels box](https://vagrantcloud.com/Sy3Omda/boxes/Windows11-Base/versions/202510.10.0/providers/parallels/arm64/vagrant.box).
+
+The catalogue supplies no checksum. Use a separately authenticated digest
+and confirm the image's WinRM certificate mapping and SSH configuration
+before enabling this job. Provide the SSH username and independently
+verified server public key as environment variables
+`KITCHEN_SSH_USERNAME` and `KITCHEN_SSH_HOST_PUBLIC_KEY`. Provide the
+client certificate, client key, server CA and SSH private key as environment
+secrets `KITCHEN_WINRM_CLIENT_CERT_PEM`, `KITCHEN_WINRM_CLIENT_KEY_PEM`,
+`KITCHEN_WINRM_CA_PEM` and `KITCHEN_SSH_KEY_PEM`. The negative check
+requires WinRM to fail with the tunnel closed before retrying with the
+verified SSH tunnel.
+
 ## VM networking
 
 With no networking options, the VM keeps the image's adapter settings. Set

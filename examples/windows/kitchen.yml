@@ -1,10 +1,19 @@
 ---
+<% require "json" %>
 driver:
   name: parallels
+<% if ENV.key?("KITCHEN_PARALLELS_WINDOWS_BOX") %>
+  box: <%= ENV.fetch("KITCHEN_PARALLELS_WINDOWS_BOX").to_json %>
+<% else %>
   source_vm: <%= ENV.fetch("KITCHEN_PARALLELS_WINDOWS_VM").to_json %>
+<% end %>
 
 transport:
   name: winrm
+<% if ENV.key?("KITCHEN_WINRM_PROBE") %>
+  max_wait_until_ready: 6
+  connection_retries: 0
+<% end %>
   winrm_transport: ssl
   no_ssl_peer_verification: false
   port: 15986
@@ -13,7 +22,12 @@ transport:
 
 provisioner:
   name: shell
-  command: Set-Content -Path (Join-Path $env:TEMP 'kitchen-parallels-smoke.txt') -Value 'converged'
+  command: >-
+<% if ENV.key?("KITCHEN_SMOKE_EXPECT_ARM64") %>
+    if ($env:PROCESSOR_ARCHITECTURE -ne "ARM64") { throw "Expected Windows ARM64" };
+    Write-Output "Windows guest architecture: ARM64";
+<% end %>
+    Set-Content -Path (Join-Path $env:TEMP 'kitchen-parallels-smoke.txt') -Value 'converged' -ErrorAction Stop
 
 verifier:
   name: shell

@@ -1,0 +1,50 @@
+---
+name: Live Windows WinRM
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/parallels-winrm
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    if: >-
+      vars.KITCHEN_WINDOWS_CI_ENABLED == 'true' &&
+      github.repository == 'test-kitchen/kitchen-parallels' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/parallels-winrm')
+    environment: windows-winrm-ci
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        guest: [windows-11-arm64]
+    runs-on:
+      group: kitchen-windows-winrm
+      labels: [self-hosted, macOS, ARM64, kitchen-parallels-winrm]
+    concurrency:
+      group: live-winrm-parallels
+    env:
+      BUNDLE_WITHOUT: development:smoke
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '4.0'
+          bundler-cache: true
+      - name: Test ${{ matrix.guest }} on parallels
+        env:
+          KITCHEN_WINDOWS_BOX_URL: ${{ vars.KITCHEN_WINDOWS_BOX_URL }}
+          KITCHEN_WINDOWS_BOX_SHA256: ${{ vars.KITCHEN_WINDOWS_BOX_SHA256 }}
+          KITCHEN_WINRM_CLIENT_CERT_PEM: ${{ secrets.KITCHEN_WINRM_CLIENT_CERT_PEM }}
+          KITCHEN_WINRM_CLIENT_KEY_PEM: ${{ secrets.KITCHEN_WINRM_CLIENT_KEY_PEM }}
+          KITCHEN_WINRM_CA_PEM: ${{ secrets.KITCHEN_WINRM_CA_PEM }}
+          KITCHEN_SSH_KEY_PEM: ${{ secrets.KITCHEN_SSH_KEY_PEM }}
+          KITCHEN_SSH_HOST_PUBLIC_KEY: ${{ vars.KITCHEN_SSH_HOST_PUBLIC_KEY }}
+          KITCHEN_SSH_USERNAME: ${{ vars.KITCHEN_SSH_USERNAME }}
+        run: bash examples/windows/ci-smoke.sh
