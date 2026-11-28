@@ -34,6 +34,8 @@ module Kitchen
       default_config :synced_folders, []
       default_config :additional_disks, []
 
+      UUID = /\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z/i.freeze
+
       include ParallelsAccess
       include ParallelsVolumes
       include Box::Source
@@ -68,7 +70,50 @@ module Kitchen
         release_box_source(state)
       end
 
+      def restore_snapshot(snapshot_id)
+        snapshot_id = snapshot_id.delete_prefix("{").delete_suffix("}")
+        raise ActionFailed, "Supply a Parallels snapshot UUID" unless UUID.match?(snapshot_id)
+
+        state_file = StateFile.new(config[:kitchen_root], instance.name)
+        state = state_file.read
+        uuid = state[:parallels_uuid]
+        token = state[:parallels_token]
+        managed_name = managed_vm_name(token)
+        vm = find_vm(state) if UUID.match?(uuid.to_s) && UUID.match?(token.to_s) && state[:parallels_name] == managed_name
+        unless vm && vm.fetch("name") == managed_name
+          raise ActionFailed, "No managed Parallels VM found for #{instance.name}"
+        end
+
+        snapshots = read_json(prlctl("snapshot-list", uuid, "--json"), "prlctl snapshot-list")
+        snapshot_key = snapshots.keys.find { |key| key.casecmp?("{#{snapshot_id}}") }
+        raise ActionFailed, "Parallels snapshot #{snapshot_id} was not found for #{instance.name}" unless snapshot_key
+
+        unless vm.fetch("status") == "stopped" && snapshots.fetch(snapshot_key).fetch("state") == "poweroff"
+          raise ActionFailed, "Restore requires a powered-off snapshot and a shut down VM"
+        end
+
+        state.delete(:last_action)
+        state.delete(:hostname)
+        Dir.mktmpdir("parallels-restore-", File.dirname(state_file.path)) do |directory|
+          pending_state = StateFile.new(directory, instance.name)
+          pending_state.write(state)
+          File.chmod(File.stat(state_file.path).mode & 0o777, pending_state.path)
+          prlctl("snapshot-switch", uuid, "--id", snapshot_key, "--skip-resume")
+          begin
+            File.rename(pending_state.path, state_file.path)
+          rescue SystemCallError => e
+            raise ActionFailed, "Restored #{instance.name}, but could not reset Kitchen state: #{e.message}. Retry restore before running kitchen create."
+          end
+        end
+      rescue SystemCallError, IOError => e
+        raise ActionFailed, "Could not complete restore for #{instance.name}: #{e.message}"
+      end
+
       private
+
+      def managed_vm_name(token)
+        "kitchen-#{instance.name}-#{token}"
+      end
 
       def validate_config
         unless config[:source_vm].nil? ^ config[:box].nil?
@@ -90,7 +135,7 @@ module Kitchen
 
         state[:parallels_token] = SecureRandom.uuid
         # The name lets us recover if prlctl succeeds before the UUID is saved.
-        state[:parallels_name] = "kitchen-#{instance.name}-#{state[:parallels_token]}"
+        state[:parallels_name] = managed_vm_name(state[:parallels_token])
         state[:parallels_import] = importing
         state[:parallels_uuid] = state[:parallels_token] if importing
         checkpoint(state)

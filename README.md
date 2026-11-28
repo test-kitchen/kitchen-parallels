@@ -98,6 +98,38 @@ The optional YAML map supports `type: parallels`, `create`, `disabled`,
 the VM. Format and mount them in the provisioner if your tests need a filesystem.
 Destroy and recreate the instance to apply volume changes.
 
+## Restore a snapshot
+
+Use the exact instance name from `kitchen list`. Find its Parallels VM UUID in
+`.kitchen/INSTANCE.yml` under `parallels_uuid`. Run
+`prlctl list VM_UUID --info --json` and verify its registered name matches both
+`parallels_name` and `kitchen-INSTANCE-TOKEN`, where `TOKEN` is the saved
+`parallels_token`. Shut down the disposable guest before taking or restoring a
+snapshot. Run these commands one at a time for the instance.
+
+```sh
+prlctl stop VM_UUID
+prlctl snapshot VM_UUID --name baseline
+prlctl snapshot-list VM_UUID --json
+bundle exec kitchen-parallels restore INSTANCE SNAPSHOT_UUID
+bundle exec kitchen create INSTANCE
+```
+
+Restore uses the saved VM UUID and checks the registered VM name against
+Kitchen's ownership token. This works for Kitchen imports and full clones
+whose registered names still match the state file. The source VM and source
+box are untouched. Pass a snapshot UUID from that VM's inventory, with or
+without braces. Running, paused and suspended VMs and snapshots taken while
+the guest was running are outside this workflow.
+
+Restoring rolls the guest disks and VM settings back to the selected snapshot.
+Host files in shared folders retain their current contents. Kitchen checks the
+inventory before switching snapshots or writing instance state. After a restore
+the VM stays stopped and Kitchen clears its recorded lifecycle stage and
+address. `kitchen create` starts the same VM and refreshes access before you
+use `kitchen exec` or converge again. Keep the Kitchen state and any generated
+SSH key until you destroy the instance.
+
 ## Rsync uploads
 
 With `kitchen-sync` installed, set `transport.name: rsync`. It still uses
@@ -137,7 +169,7 @@ or a different driver:
 - Remote box lookup, downloads, automatic version checks and updates.
 - Other hypervisors, Windows and WinRM, port forwarding, bridged and private
   network setup, and static IP configuration.
-- Linked clones and snapshots, VM packaging, Vagrantfile hooks, arbitrary
+- Linked clones, VM packaging, Vagrantfile hooks, arbitrary
   provider customisation, Vagrant provisioning and guest environment settings.
 - NFS, SMB and Vagrant rsync shared folders, host or guest tool management, and
   the Vagrant Chef cache options.
