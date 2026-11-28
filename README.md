@@ -77,6 +77,18 @@ configured separately with `transport.max_wait_until_ready`.
 The driver checks the address reported by Parallels Tools first and uses
 active Parallels DHCP leases for the VM's MAC address as a fallback.
 
+Set `driver.cpus` for the number of virtual processors and `driver.memory`
+for the memory in megabytes. Both accept positive integers. You can set them
+independently, and the VM keeps the source image's setting for each option
+you omit.
+
+```yaml
+driver:
+  name: parallels
+  cpus: 3
+  memory: 2048
+```
+
 ## Shared folders and disks
 
 Add the options under the global driver to share them across platforms, or
