@@ -213,7 +213,7 @@ describe Kitchen::Driver::Parallels do
       instance = Struct.new(:name, :transport).new("network", transport)
       token = "7ef7d82b-de62-477b-a5f9-3f0669fd569c"
       state = { parallels_token: token, parallels_uuid: token, parallels_import: true, parallels_network: network }
-      vm = { "uuid" => token, "status" => "running", "ip_configured" => "10.37.129.10" }
+      vm = { "uuid" => token, "name" => "kitchen-network-#{token}", "status" => "running", "ip_configured" => "10.37.129.10" }
 
       account = Struct.new(:dir).new(root)
       Etc.stub(:getpwuid, account) do
