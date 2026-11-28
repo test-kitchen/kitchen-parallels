@@ -15,6 +15,7 @@ require "shellwords" unless defined?(Shellwords)
 require "tmpdir" unless defined?(Dir.mktmpdir)
 require_relative "parallels/access"
 require_relative "parallels/volumes"
+require_relative "parallels/network"
 
 module Kitchen
   module Driver
@@ -34,6 +35,11 @@ module Kitchen
       default_config :synced_folders, []
       default_config :additional_disks, []
 
+      default_config :network_mode
+      default_config :static_ip
+      default_config :port_forward
+
+      include ParallelsNetwork
       include ParallelsAccess
       include ParallelsVolumes
       include Box::Source
@@ -41,20 +47,27 @@ module Kitchen
       def create(state)
         validate_config
         volumes = volume_configuration
-        prepare_state(state)
-        vm = find_vm(state) || create_vm(state)
+        network = network_configuration
+        prepare_state(state, network)
+        vm = find_vm(state)
+        unless vm
+          remove_port_forward(state)
+          vm = create_vm(state)
+        end
         state[:parallels_uuid] = vm.fetch("uuid")
         checkpoint(state)
-        start_vm(vm, volumes, imported: state[:parallels_import])
-        state[:hostname] = wait_for_ip(state[:parallels_uuid])
+        start_vm(vm, volumes, imported: state[:parallels_import], network: network)
+        state[:hostname] = wait_for_ip(state[:parallels_uuid], network: network)
         configure_ssh(state)
         instance.transport.connection(state).wait_until_ready
         mount_shared_folders(state[:parallels_uuid], volumes[:folders])
+        install_port_forward(state) if network[:forward]
       end
 
       def destroy(state)
         return unless state[:parallels_token]
 
+        remove_port_forward(state)
         vm = find_vm(state)
         if vm
           uuid = vm.fetch("uuid")
@@ -81,17 +94,25 @@ module Kitchen
         end
       end
 
-      def prepare_state(state)
+      def prepare_state(state, network)
         importing = !config[:box].nil?
         if state[:parallels_token] && state[:parallels_import] != importing
           raise ActionFailed, "The Parallels source type changed. Run kitchen destroy before creating a new instance."
         end
-        return if state[:parallels_token]
+
+        if state[:parallels_token]
+          unless (state[:parallels_network] || {}) == network
+            raise ActionFailed, "The Parallels network configuration changed. Run kitchen destroy first."
+          end
+
+          return
+        end
 
         state[:parallels_token] = SecureRandom.uuid
         # The name lets us recover if prlctl succeeds before the UUID is saved.
         state[:parallels_name] = "kitchen-#{instance.name}-#{state[:parallels_token]}"
         state[:parallels_import] = importing
+        state[:parallels_network] = network unless network.empty?
         state[:parallels_uuid] = state[:parallels_token] if importing
         checkpoint(state)
       end
@@ -180,7 +201,7 @@ module Kitchen
         FileUtils.remove_entry_secure(directory) if File.exist?(directory)
       end
 
-      def start_vm(vm, volumes, imported:)
+      def start_vm(vm, volumes, imported:, network:)
         uuid = vm.fetch("uuid")
         return if vm.fetch("status") == "running"
 
@@ -189,12 +210,14 @@ module Kitchen
           prlctl("resume", uuid)
         else
           prlctl("set", uuid, "--startup-view", "headless", "--shf-host", "off", "--smart-mount", "off")
+          configure_network(uuid, network)
           configure_hardware(uuid, volumes, imported: imported)
           prlctl("start", uuid)
         end
       end
 
-      def wait_for_ip(uuid)
+      def wait_for_ip(uuid, network:)
+        static_address = network[:static_ip]&.split("/")&.first
         start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         deadline = start + config[:ip_timeout]
         lease_fallback_at = start + [10, config[:ip_timeout] / 2.0].min
@@ -204,8 +227,10 @@ module Kitchen
           raise ActionFailed, "Parallels VM #{uuid} disappeared during boot" unless vm
 
           now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          address = reported_ips(vm).find { |value| usable_ipv4?(value) }
-          address ||= leased_ipv4(vm) if now >= lease_fallback_at
+          address = reported_ips(vm).find { |value| static_address ? value == static_address : usable_ipv4?(value) }
+          if !static_address && network[:mode] != "bridged" && now >= lease_fallback_at
+            address ||= leased_ipv4(vm)
+          end
           if address
             if vms.any? { |entry| entry != vm && entry["status"] == "running" && reported_ips(entry).include?(address) }
               raise ActionFailed, "Multiple running Parallels VMs report #{address}. Use a base image with a unique DHCP identity for each clone."
@@ -215,7 +240,7 @@ module Kitchen
           end
 
           remaining = deadline - now
-          raise ActionFailed, "No guest IPv4 address for #{uuid}. Check shared networking and Parallels Tools." if remaining <= 0
+          raise ActionFailed, "No guest IPv4 address for #{uuid}. Check guest networking and Parallels Tools." if remaining <= 0
 
           sleep([2, remaining].min)
         end

@@ -77,6 +77,37 @@ configured separately with `transport.max_wait_until_ready`.
 The driver checks the address reported by Parallels Tools first and uses
 active Parallels DHCP leases for the VM's MAC address as a fallback.
 
+## VM networking
+
+With no networking options, the VM keeps the image's adapter settings. Set
+`driver.network_mode` to `shared`, `host-only` (private to the host and its
+VMs), or `bridged` (the default host bridge). Explicit settings apply to the
+image's first network adapter, `net0`. Use an image with one network adapter.
+Bridged mode exposes the guest to the LAN as soon as it boots. Use an image
+with secure SSH credentials already installed and set `insert_key: false`.
+
+For a static address, set `driver.static_ip` to an unused IPv4 address with a
+CIDR prefix on the selected network. Start with a DHCP-configured image.
+Static addressing requires Parallels Tools and guest support for applying its
+IPv4 settings. An address already configured in the image can remain active. Kitchen waits for the requested
+address before connecting. For example, on a host-only subnet with an address
+reserved outside DHCP allocation:
+
+```yaml
+driver:
+  name: parallels
+  network_mode: host-only
+  static_ip: 10.37.129.10/24
+```
+
+For a TCP port forward, set `driver.port_forward` to
+`{ host_port: 22080, guest_port: 8080 }`. This selects shared networking when
+no mode is supplied. The rule can expose the guest service to systems that
+can reach the host port. Kitchen continues to use the guest IP for SSH.
+Kitchen removes its rule during destroy. UDP, multiple forwards, IPv6 static
+addresses, and bridge interface selection are outside these options. Destroy
+and recreate an instance when changing its network configuration.
+
 ## Shared folders and disks
 
 Add the options under the global driver to share them across platforms, or
@@ -135,8 +166,7 @@ blank extra disks. These Vagrant features still need a separate implementation
 or a different driver:
 
 - Remote box lookup, downloads, automatic version checks and updates.
-- Other hypervisors, Windows and WinRM, port forwarding, bridged and private
-  network setup, and static IP configuration.
+- Other hypervisors, Windows and WinRM.
 - Linked clones and snapshots, VM packaging, Vagrantfile hooks, arbitrary
   provider customisation, Vagrant provisioning and guest environment settings.
 - NFS, SMB and Vagrant rsync shared folders, host or guest tool management, and
