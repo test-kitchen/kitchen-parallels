@@ -114,6 +114,7 @@ module Kitchen
           manifest = File.expand_path(manifest, config[:kitchen_root]) unless manifest.to_s.empty?
           catalog = Box::Catalog.new(manifest)
           entry = catalog.find(name: box[:name], version: box[:version], provider: "parallels")
+          Box::Cache.new(config[:box_cache]).validate_destination(catalog, entry)
           catalog.verify(entry)
         when String
           path = File.expand_path(box, config[:kitchen_root])
