@@ -64,15 +64,34 @@ describe "Kitchen Parallels diagnostics" do
   it "checks host access and the source with Kitchen doctor" do
     with_project do |root|
       Dir.mkdir(File.join(root, "local.pvm"))
-      output, errors, process = kitchen(root, "doctor", inventory: "[]")
+      state = File.join(root, ".kitchen", "default-linux.yml")
+      original = File.binread(state)
+      inventory = { "uuid" => "test-vm", "status" => "running", "name" => "managed" }
+      output, errors, process = kitchen(root, "doctor", inventory: [inventory].to_json)
       _(process.success?).must_equal true, output + errors
 
       Dir.rmdir(File.join(root, "local.pvm"))
       output, errors, process = kitchen(root, "doctor", inventory: nil)
       _(process.exitstatus).must_equal 1
       _(output + errors).must_match(/Parallels provider unavailable/)
+      _(File.binread(state)).must_equal original
       _(output + errors).must_match(/readable local Parallels.*local\.pvm/)
       _(File.readlines(File.join(root, "provider-calls"), chomp: true).map { |line| line.split.first }).must_equal %w{list list}
+    end
+  end
+
+  it "reports malformed VM inventory as an unavailable provider" do
+    with_project do |root|
+      Dir.mkdir(File.join(root, "local.pvm"))
+      inventory = '[{"uuid":"test-vm","name":"managed","status":null}]'
+      output, errors, process = kitchen(root, "list", "--live", "--json", inventory: inventory)
+      _(process.success?).must_equal true, errors
+      result = JSON.parse(output).fetch(0).fetch("status")
+      _(result.values_at("state", "live")).must_equal ["unknown", nil]
+
+      output, errors, process = kitchen(root, "doctor", inventory: inventory)
+      _(process.exitstatus).must_equal 1
+      _(output + errors).must_match(/Invalid VM inventory from prlctl/)
     end
   end
 

@@ -81,7 +81,7 @@ module Kitchen
         end
 
         id = vm.fetch("uuid")
-        vm_state = vm.fetch("status") { raise ActionFailed, "prlctl did not report status for #{id}" }
+        vm_state = vm.fetch("status")
         status_report(vm_state == "running", vm_state, "Parallels reports the VM as #{vm_state}", id)
       rescue ActionFailed => e
         status_report(nil, "unknown", e.message, id)
@@ -303,7 +303,12 @@ module Kitchen
       end
 
       def vm_list
-        read_json(prlctl("list", "--all", "--full", "--output", "uuid,status,ip_configured,mac,name", "--json"), "prlctl list")
+        inventory = read_json(prlctl("list", "--all", "--full", "--output", "uuid,status,ip_configured,mac,name", "--json"), "prlctl list")
+        unless inventory.is_a?(Array) && inventory.all? { |vm| vm.is_a?(Hash) && %w{uuid name status}.all? { |key| vm[key].is_a?(String) && !vm[key].empty? } }
+          raise ActionFailed, "Invalid VM inventory from prlctl list: expected UUID, name and status for each VM"
+        end
+
+        inventory
       end
 
       def read_json(output, source)
