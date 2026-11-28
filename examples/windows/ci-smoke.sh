@@ -15,6 +15,13 @@ if [[ $KITCHEN_WINDOWS_BOX_URL != https://* ||
   exit 1
 fi
 
+: "${KITCHEN_WINRM_CLIENT_CERT_PEM:?Set the guest WinRM client certificate}"
+: "${KITCHEN_WINRM_CLIENT_KEY_PEM:?Set the guest WinRM client key}"
+: "${KITCHEN_WINRM_CA_PEM:?Set the WinRM server CA}"
+: "${KITCHEN_SSH_KEY_PEM:?Set the SSH forwarding key}"
+: "${KITCHEN_SSH_HOST_PUBLIC_KEY:?Set the verified SSH server public key}"
+: "${KITCHEN_SSH_USERNAME:?Set the SSH forwarding account}"
+
 prlctl --version
 config_dir=$(cd -- "$(dirname -- "$0")" && pwd)
 export BUNDLE_GEMFILE="$config_dir/../../Gemfile"
@@ -48,15 +55,10 @@ curl --fail --silent --show-error --location --max-redirs 5 --retry 2 \
   --proto '=https' --proto-redir '=https' --output guest.box "$KITCHEN_WINDOWS_BOX_URL"
 printf '%s  guest.box\n' "$KITCHEN_WINDOWS_BOX_SHA256" | shasum --algorithm 256 --check
 # BSD tar accepts the archive member with or without the leading ./.
-tar -xOf guest.box metadata.json | ruby -rjson -e \
-  'abort "Unexpected box provider" unless JSON.parse(STDIN.read).fetch("provider") == ARGV.fetch(0)' parallels
+tar --fast-read -xOf guest.box metadata.json | ruby -rjson -e \
+  'meta = JSON.parse(STDIN.read); abort "Unexpected box provider or architecture" unless
+    meta.fetch("provider") == ARGV.fetch(0) && meta.fetch("architecture", "arm64") == "arm64"' parallels
 
-: "${KITCHEN_WINRM_CLIENT_CERT_PEM:?Set the guest WinRM client certificate}"
-: "${KITCHEN_WINRM_CLIENT_KEY_PEM:?Set the guest WinRM client key}"
-: "${KITCHEN_WINRM_CA_PEM:?Set the WinRM server CA}"
-: "${KITCHEN_SSH_KEY_PEM:?Set the SSH forwarding key}"
-: "${KITCHEN_SSH_HOST_PUBLIC_KEY:?Set the verified SSH server public key}"
-: "${KITCHEN_SSH_USERNAME:?Set the SSH forwarding account}"
 export KITCHEN_PARALLELS_WINDOWS_BOX="$scratch/guest.box"
 export KITCHEN_WINRM_CLIENT_CERT="$scratch/client.pem"
 export KITCHEN_WINRM_CLIENT_KEY="$scratch/client-key.pem"
