@@ -4,6 +4,7 @@
 require "minitest/autorun"
 require "minitest/mock"
 require "open3"
+require "timeout"
 require "kitchen/data_munger"
 require "kitchen/driver/parallels"
 
@@ -59,6 +60,61 @@ describe Kitchen::Driver::Parallels do
     assert_raises(Kitchen::ActionFailed) { invalid_disk.send(:volume_configuration) }
   end
 
+  it "serializes first create and destroy across Kitchen processes through the final state write" do
+    Dir.mktmpdir do |root|
+      File.write(File.join(root, "kitchen.yml"), <<~YAML)
+        driver:
+          name: parallels
+          source_vm: base
+        provisioner:
+          name: shell
+        platforms:
+          - name: linux
+        suites:
+          - name: default
+      YAML
+
+      Dir.chdir(root) do
+        ready, signal = IO.pipe
+        resume, release = IO.pipe
+        creator = fork do
+          release.close
+          instance = Kitchen::Config.new.instances.first
+          instance.driver.define_singleton_method(:create) do |state|
+            state[:parallels_token] = "first-create"
+            signal.puts "creating"
+            resume.gets
+          end
+          instance.create
+          exit! 0
+        end
+        signal.close
+        resume.close
+        assert_equal "creating\n", Timeout.timeout(10) { ready.gets }
+
+        instance = Kitchen::Config.new.instances.first
+        lock_path = "#{instance.state_path}.parallels.lock"
+        File.open(lock_path, "r+") do |lock|
+          refute lock.flock(File::LOCK_EX | File::LOCK_NB)
+          refute File.exist?(instance.state_path)
+          received = nil
+          instance.driver.define_singleton_method(:destroy) { |state| received = state.dup }
+          release.puts "finish"
+          instance.destroy
+          assert_equal %w{first-create create}, received.values_at(:parallels_token, :last_action)
+          refute File.exist?(instance.state_path)
+          assert_equal lock.stat.ino, File.stat(lock_path).ino
+        end
+        _, result = Process.wait2(creator)
+        creator = nil
+        assert result.success?
+      ensure
+        [ready, signal, resume, release].each { |pipe| pipe&.close unless pipe&.closed? }
+        Process.wait(creator) if creator
+      end
+    end
+  end
+
   it "recovers and destroys only the linked clone after registration is interrupted" do
     Dir.mktmpdir do |root|
       snapshot = "7b485669-5347-4592-809c-a9274908bc18"
@@ -70,7 +126,7 @@ describe Kitchen::Driver::Parallels do
       def connection.wait_until_ready; end
       transport = Object.new
       transport.define_singleton_method(:connection) { |_state| connection }
-      driver = Kitchen::Driver::Parallels.new(kitchen_root: root, source_vm: "base", source_snapshot: snapshot)
+      driver = Kitchen::Driver::Parallels.new(kitchen_root: root, source_vm: "base", source_snapshot: snapshot.upcase)
       instance = Struct.new(:name, :transport, :logger).new("default-linux", transport, Kitchen.logger)
       state = {}
       commands = lambda do |*args|
@@ -84,7 +140,7 @@ describe Kitchen::Driver::Parallels do
         when %w{prlctl clone}
           directory = File.join(root, ".kitchen", "parallels-#{state.fetch(:parallels_token)}")
           _(args).must_equal ["prlctl", "clone", "source-uuid", "--name", state.fetch(:parallels_name),
-            "--linked", "--id", snapshot, "--dst", directory, "--detach-external-hdd", "yes"]
+            "--linked", "--id", "{#{snapshot}}", "--dst", directory, "--detach-external-hdd", "yes"]
           assert File.directory?(directory)
           clone_home = File.join(directory, "clone.pvm")
           FileUtils.mkdir_p(clone_home)
@@ -105,6 +161,7 @@ describe Kitchen::Driver::Parallels do
           error = assert_raises(Kitchen::ActionFailed) { driver.create(state) }
           assert_includes error.message, "interrupted after registration"
           state = Kitchen::StateFile.new(root, "default-linux").read
+          assert_equal snapshot, state[:parallels_snapshot]
           reported_home = File.join(root, "unrelated.pvm")
           FileUtils.mkdir_p(reported_home)
           assert_includes assert_raises(Kitchen::ActionFailed) { driver.destroy(state) }.message, "Cannot verify ownership"
@@ -114,6 +171,10 @@ describe Kitchen::Driver::Parallels do
           assert_includes assert_raises(Kitchen::ActionFailed) { driver.destroy(state) }.message, "Cannot verify ownership"
           File.unlink(directory)
           File.rename("#{directory}.saved", directory)
+          reported_home = File.join(directory, "alias.pvm")
+          File.symlink(clone_home, reported_home)
+          assert_includes assert_raises(Kitchen::ActionFailed) { driver.destroy(state) }.message, "Cannot verify ownership"
+          File.unlink(reported_home)
           reported_home = clone_home
           driver.create(state)
           _(state.values_at(:parallels_uuid, :hostname)).must_equal ["clone-uuid", "10.0.0.2"]

@@ -20,6 +20,22 @@ module Kitchen
   module Driver
     # Creates disposable Linux VMs using the local Parallels Desktop CLI.
     class Parallels < Base
+      # The transition owns Kitchen's state reads, writes and final destroy unlink.
+      module InstanceLifecycle
+        private
+
+        def transition_to(desired)
+          lock_path = "#{state_path}.parallels.lock"
+          FileUtils.mkdir_p(File.dirname(lock_path))
+          # Keep the same inode for processes already waiting on the lock.
+          File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
+            raise ActionFailed, "Cannot lock Parallels instance #{name}" unless lock.flock(File::LOCK_EX)
+
+            super
+          end
+        end
+      end
+
       kitchen_driver_api_version 2
       plugin_version "0.1.0"
 
@@ -38,6 +54,10 @@ module Kitchen
       include ParallelsAccess
       include ParallelsVolumes
       include Box::Source
+
+      def finalize_config!(instance)
+        super.tap { instance.extend(InstanceLifecycle) }
+      end
 
       def create(state)
         validate_config
@@ -143,7 +163,8 @@ module Kitchen
         uuid = vm.fetch("uuid")
         info = read_json(prlctl("list", uuid, "--info", "--json"), "prlctl list --info").first
         home = info&.fetch("Home", nil)
-        return if home && File.exist?(home) && File.directory?(directory) && !File.symlink?(directory) &&
+        return if home && File.extname(home) == ".pvm" && File.directory?(home) && !File.symlink?(home) &&
+          File.directory?(directory) && !File.symlink?(directory) &&
           File.dirname(File.realpath(home)) == File.realpath(directory)
 
         raise ActionFailed, "Cannot verify ownership of Parallels VM #{uuid}. Expected its bundle in #{directory}."
@@ -165,7 +186,7 @@ module Kitchen
       end
 
       def clone_snapshot(uuid, state)
-        snapshot = config[:source_snapshot]
+        snapshot = "{#{state.fetch(:parallels_snapshot)}}"
         directory = prepare_instance_directory(state)
         prlctl("clone", uuid, "--name", state[:parallels_name], "--linked", "--id", snapshot,
           "--dst", directory, "--detach-external-hdd", "yes")
