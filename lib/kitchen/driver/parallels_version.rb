@@ -3,6 +3,6 @@
 
 module Kitchen
   module Driver
-    PARALLELS_VERSION = "0.1.0".freeze
+    PARALLELS_VERSION = "0.2.0".freeze
   end
 end
