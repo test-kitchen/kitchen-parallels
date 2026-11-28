@@ -20,22 +20,6 @@ module Kitchen
   module Driver
     # Creates disposable Linux VMs using the local Parallels Desktop CLI.
     class Parallels < Base
-      # The transition owns Kitchen's state reads, writes and final destroy unlink.
-      module InstanceLifecycle
-        private
-
-        def transition_to(desired)
-          lock_path = "#{state_path}.parallels.lock"
-          FileUtils.mkdir_p(File.dirname(lock_path))
-          # Keep the same inode for processes already waiting on the lock.
-          File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
-            raise ActionFailed, "Cannot lock Parallels instance #{name}" unless lock.flock(File::LOCK_EX)
-
-            super
-          end
-        end
-      end
-
       kitchen_driver_api_version 2
       plugin_version "0.1.0"
 
@@ -56,16 +40,42 @@ module Kitchen
       include Box::Source
 
       def finalize_config!(instance)
-        super.tap { instance.extend(InstanceLifecycle) }
+        super
+        if !lifecycle_hook_available? && instance_state_file.read[:parallels_snapshot]
+          raise UserError, linked_clone_core_error
+        end
+
+        self
+      end
+
+      def with_instance_lifecycle
+        directory = File.dirname(instance.state_path)
+        FileUtils.mkdir_p(directory)
+        lock_path = File.join(File.realpath(directory), "#{File.basename(instance.state_path)}.parallels.lock")
+        held_locks = Thread.current.thread_variable_get(:kitchen_parallels_locks) || []
+        if held_locks.include?(lock_path)
+          raise ActionFailed, "Cannot run a nested Parallels lifecycle transition for #{instance.name}"
+        end
+
+        Thread.current.thread_variable_set(:kitchen_parallels_locks, held_locks)
+        held_locks.push(lock_path)
+        begin
+          with_lifecycle_lock(lock_path) { yield }
+        ensure
+          held_locks.pop
+        end
       end
 
       def create(state)
         validate_config
+        if (config[:source_snapshot] || state[:parallels_snapshot]) && !lifecycle_hook_available?
+          raise ActionFailed, linked_clone_core_error
+        end
+
         volumes = volume_configuration
         prepare_state(state)
         vm = find_vm(state) || create_vm(state)
-        state[:parallels_uuid] = vm.fetch("uuid")
-        checkpoint(state)
+        save_vm_uuid(state, vm)
         start_vm(vm, volumes, imported: state[:parallels_import])
         state[:hostname] = wait_for_ip(state[:parallels_uuid])
         configure_ssh(state)
@@ -74,10 +84,12 @@ module Kitchen
       end
 
       def destroy(state)
+        raise ActionFailed, linked_clone_core_error if state[:parallels_snapshot] && !lifecycle_hook_available?
         return unless state[:parallels_token]
 
         vm = find_vm(state)
         if vm
+          save_vm_uuid(state, vm) if state[:parallels_snapshot]
           uuid = vm.fetch("uuid")
           status = vm.fetch("status")
           if status != "stopped"
@@ -90,6 +102,24 @@ module Kitchen
       end
 
       private
+
+      def lifecycle_hook_available?
+        Base.public_method_defined?(:with_instance_lifecycle)
+      end
+
+      def linked_clone_core_error
+        "Parallels linked clones require Test Kitchen with Driver::Base#with_instance_lifecycle. " \
+          "Use a hook-enabled Test Kitchen to create or destroy the linked clone."
+      end
+
+      def with_lifecycle_lock(lock_path)
+        # Waiters must keep using the same inode after destroy removes state.
+        File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
+          raise ActionFailed, "Cannot lock Parallels instance #{instance.name}" unless lock.flock(File::LOCK_EX)
+
+          yield
+        end
+      end
 
       def validate_config
         unless config[:source_vm].nil? ^ config[:box].nil?
@@ -133,7 +163,19 @@ module Kitchen
       end
 
       def checkpoint(state)
-        StateFile.new(config[:kitchen_root], instance.name).write(state)
+        instance_state_file.write(state)
+      end
+
+      def instance_state_file
+        StateFile.new(config[:kitchen_root], instance.name)
+      end
+
+      def save_vm_uuid(state, vm)
+        uuid = vm.fetch("uuid")
+        return if state[:parallels_uuid] == uuid
+
+        state[:parallels_uuid] = uuid
+        checkpoint(state)
       end
 
       def create_vm(state)
@@ -147,15 +189,39 @@ module Kitchen
       end
 
       def find_vm(state)
-        vm = vm_list.find do |entry|
+        registrations = vm_list
+        return find_linked_clone(registrations, state) if state[:parallels_snapshot]
+
+        registrations.find do |entry|
           if state[:parallels_uuid]
             entry.fetch("uuid") == state[:parallels_uuid]
           else
             entry.fetch("name") == state[:parallels_name]
           end
         end
-        verify_linked_clone_directory(vm, state) if vm && state[:parallels_snapshot]
+      end
+
+      def find_linked_clone(registrations, state)
+        vm = registrations.find { |entry| entry.fetch("uuid") == state[:parallels_uuid] }
+        vm ||= recover_linked_registration(registrations, state)
+        return unless vm
+
+        verify_linked_clone_directory(vm, state)
         vm
+      end
+
+      def recover_linked_registration(registrations, state)
+        matches = registrations.select { |entry| entry.fetch("name") == state.fetch(:parallels_name) }
+        return matches.first if matches.one?
+
+        directory = instance_directory(state)
+        if matches.empty? && !File.symlink?(directory)
+          return unless File.exist?(directory)
+          return if File.directory?(directory) && Dir.empty?(directory)
+        end
+
+        raise ActionFailed, "Cannot verify ownership of the Parallels linked clone in #{directory}. " \
+          "See the README for manual recovery."
       end
 
       def verify_linked_clone_directory(vm, state)

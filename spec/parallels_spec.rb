@@ -8,6 +8,10 @@ require "timeout"
 require "kitchen/data_munger"
 require "kitchen/driver/parallels"
 
+if ENV["REQUIRE_INSTANCE_LIFECYCLE"] == "1" && !Kitchen::Driver::Base.public_method_defined?(:with_instance_lifecycle)
+  abort "The supported-core suite requires Driver::Base#with_instance_lifecycle"
+end
+
 describe Kitchen::Driver::Parallels do
   let(:driver) { Kitchen::Driver::Parallels.new({ kitchen_root: Dir.pwd }) }
 
@@ -60,7 +64,59 @@ describe Kitchen::Driver::Parallels do
     assert_raises(Kitchen::ActionFailed) { invalid_disk.send(:volume_configuration) }
   end
 
+  def lifecycle_hook_available?
+    Kitchen::Driver::Base.public_method_defined?(:with_instance_lifecycle)
+  end
+
+  it "protects new linked clones and saved linked state on released core" do
+    skip "Requires core without the lifecycle hook" if lifecycle_hook_available?
+
+    Dir.mktmpdir do |root|
+      instance = Struct.new(:name).new("default-linux")
+      snapshot = "7b485669-5347-4592-809c-a9274908bc18"
+      driver = Kitchen::Driver::Parallels.new(kitchen_root: root, source_vm: "base", source_snapshot: snapshot)
+      driver.finalize_config!(instance)
+      state = {}
+      assert_includes assert_raises(Kitchen::ActionFailed) { driver.create(state) }.message, "linked clones require Test Kitchen"
+      assert_empty state
+      refute File.exist?(File.join(root, ".kitchen"))
+
+      state_file = Kitchen::StateFile.new(root, instance.name)
+      state = { parallels_snapshot: snapshot, parallels_token: "saved-token", last_action: "create" }
+      state_file.write(state)
+      default_driver = Kitchen::Driver::Parallels.new(kitchen_root: root, source_vm: "base")
+      assert_includes assert_raises(Kitchen::UserError) { default_driver.finalize_config!(instance) }.message, "linked clones require Test Kitchen"
+      assert_includes assert_raises(Kitchen::ActionFailed) { default_driver.destroy(state) }.message, "linked clones require Test Kitchen"
+      assert_equal state, state_file.read
+    end
+  end
+
+  it "rejects a recursive transition and releases the lock after failure" do
+    skip "Requires core with the lifecycle hook" unless lifecycle_hook_available?
+
+    Dir.mktmpdir do |root|
+      state_path = File.join(root, ".kitchen", "default-linux.yml")
+      instance = Struct.new(:name, :state_path).new("default-linux", state_path)
+      driver = Kitchen::Driver::Parallels.new(kitchen_root: root, source_vm: "base")
+      driver.finalize_config!(instance)
+
+      error = assert_raises(Kitchen::ActionFailed) do
+        driver.with_instance_lifecycle do
+          driver.with_instance_lifecycle { flunk "Recursive transition ran" }
+        end
+      end
+      assert_includes error.message, "nested Parallels lifecycle transition"
+      File.open("#{state_path}.parallels.lock", "r+") do |lock|
+        assert lock.flock(File::LOCK_EX | File::LOCK_NB)
+      end
+      result = driver.with_instance_lifecycle { :complete }
+      assert_equal :complete, result
+    end
+  end
+
   it "serializes first create and destroy across Kitchen processes through the final state write" do
+    skip "Requires core with the lifecycle hook" unless lifecycle_hook_available?
+
     Dir.mktmpdir do |root|
       File.write(File.join(root, "kitchen.yml"), <<~YAML)
         driver:
@@ -116,6 +172,8 @@ describe Kitchen::Driver::Parallels do
   end
 
   it "recovers and destroys only the linked clone after registration is interrupted" do
+    skip "Requires core with the lifecycle hook" unless lifecycle_hook_available?
+
     Dir.mktmpdir do |root|
       snapshot = "7b485669-5347-4592-809c-a9274908bc18"
       source = { "name" => "base", "uuid" => "source-uuid", "status" => "stopped" }
@@ -149,6 +207,8 @@ describe Kitchen::Driver::Parallels do
           raise Kitchen::ActionFailed, "interrupted after registration"
         when %w{prlctl stop}
           _(args.drop(2)).must_equal ["clone-uuid", "--kill"]
+          persisted = Kitchen::StateFile.new(root, "default-linux").read
+          assert_equal "clone-uuid", persisted[:parallels_uuid]
         when %w{prlctl delete}
           _(args.drop(2)).must_equal ["clone-uuid"]
           clone = nil
@@ -178,6 +238,14 @@ describe Kitchen::Driver::Parallels do
           reported_home = clone_home
           driver.create(state)
           _(state.values_at(:parallels_uuid, :hostname)).must_equal ["clone-uuid", "10.0.0.2"]
+          state[:parallels_uuid] = "stale-uuid"
+          Kitchen::StateFile.new(root, "default-linux").write(state)
+          clone["name"] = "renamed"
+          error = assert_raises(Kitchen::ActionFailed) { driver.destroy(state) }
+          assert_includes error.message, "manual recovery"
+          assert File.directory?(clone_home)
+          assert_equal "stale-uuid", Kitchen::StateFile.new(root, "default-linux").read[:parallels_uuid]
+          clone["name"] = state.fetch(:parallels_name)
           driver.destroy(state)
           assert_nil clone
           assert_empty Dir.glob(File.join(root, ".kitchen", "parallels-*"))
@@ -197,6 +265,8 @@ describe Kitchen::Driver::Parallels do
   end
 
   it "requires teardown before switching an existing full clone to a linked clone" do
+    skip "Requires core with the lifecycle hook" unless lifecycle_hook_available?
+
     driver = Kitchen::Driver::Parallels.new(source_vm: "base", source_snapshot: "7b485669-5347-4592-809c-a9274908bc18")
     existing = { parallels_token: "existing", parallels_import: false }
 

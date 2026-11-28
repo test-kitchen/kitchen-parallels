@@ -19,7 +19,17 @@ using the NIC's MAC address or another unique DHCP client ID.
 
 Run `bundle install` in this checkout to install Test Kitchen and the
 provisioners for the Apache smoke tests. Set `TEST_KITCHEN_PATH` to use a
-compatible local Test Kitchen checkout.
+compatible local Test Kitchen checkout. To run the unit suite and require the
+linked clone and lifecycle lock tests to be available, use a hook-enabled
+checkout and run:
+
+```sh
+TEST_KITCHEN_PATH=/path/to/test-kitchen bundle install
+TEST_KITCHEN_PATH=/path/to/test-kitchen REQUIRE_INSTANCE_LIFECYCLE=1 bundle exec rake test
+```
+
+Run `bundle exec rake test` with the released-core bundle to check the
+compatibility path.
 
 To use this driver from another project, add `kitchen-parallels` to its
 Gemfile. Bundler installs a compatible Test Kitchen version.
@@ -86,6 +96,30 @@ the clone bundle in its Kitchen instance directory. Run `kitchen destroy`
 before switching between full and linked clones or choosing a different
 snapshot. Kitchen removes the clone and its files and leaves the source VM
 and snapshot intact.
+
+Linked clones require Test Kitchen with the public
+`Driver::Base#with_instance_lifecycle` hook, including when tearing down
+previously saved linked state. Test Kitchen 4.2.1 still supports full clones
+and box imports.
+
+With a hook-enabled core, the driver locks each instance across action
+selection, lifecycle hooks, and state changes. Use the same hook-enabled
+version for every Kitchen process sharing the workspace. Keep the
+`.parallels.lock` sidecar in place. The driver rejects recursive transitions
+on the same instance from the same thread. A lifecycle hook must never start
+and wait for another Kitchen process or thread targeting its locked instance.
+
+If the saved UUID is absent from Parallels, Kitchen can recover the clone by
+its generated name after verifying that its bundle is inside the instance
+directory. If Kitchen cannot verify a linked clone registration, stop all Kitchen
+processes using the workspace. Back up the instance state YAML and inspect
+`prlctl list --all --json` and `prlctl list <uuid> --info --json` against
+the saved UUID, generated name and bundle under `.kitchen/parallels-<token>`.
+If you can verify the linked clone, restore its generated name in Parallels
+and retry `kitchen destroy`. If its directory holds only unregistered
+files, move the directory aside after confirming that no Parallels VM uses
+it, then retry destroy. If ownership is unclear, preserve the state and
+files for investigation.
 
 `source_snapshot` requires `source_vm`. To use a box, omit
 `source_snapshot` and let Kitchen import it, or register a disposable copy
