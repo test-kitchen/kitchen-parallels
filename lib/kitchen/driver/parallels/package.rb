@@ -12,23 +12,28 @@ module Kitchen
           raise ActionFailed, "Create the Kitchen instance before packaging it"
         end
 
-        refuse_package_with_injected_key(state)
+        verify_package_source(state)
 
         output = File.join(config[:kitchen_root], "#{instance.name}.box")
         raise ActionFailed, "Package already exists: #{output}" if File.exist?(output) || File.symlink?(output)
 
-        source = find_vm(state)
-        unless source && source.fetch("name") == state[:parallels_name] && source.fetch("status") == "stopped"
+        source = package_vm_list.find { |vm| vm["uuid"] == state[:parallels_uuid] }
+        unless source && source["name"] == state[:parallels_name] && source["status"] == "stopped"
           raise ActionFailed, "Shut down the managed Parallels VM before packaging it"
         end
 
         source_uuid = source.fetch("uuid")
-        disks = package_disks(package_vm_info(source_uuid))
+        details = package_vm_info(source_uuid)
+        unless File.dirname(File.realpath(details.fetch("Home"))) == File.realpath(import_directory(state))
+          raise ActionFailed, "Could not confirm the Parallels VM belongs to the verified archive import"
+        end
+
+        disks = package_disks(details)
         stage = Dir.mktmpdir(".parallels-package-", File.dirname(output))
         name = "kitchen-package-#{SecureRandom.uuid}"
         bundle = File.join(stage, "#{name}.pvm")
         packaging_clone(source_uuid, name, stage, bundle, disks) { stage = nil }
-        refuse_package_with_injected_key(state)
+        verify_package_source(state)
         validate_package_bundle(bundle)
         backup = File.join(bundle, "config.pvs.backup")
         File.unlink(backup) if File.file?(backup)
@@ -49,6 +54,19 @@ module Kitchen
 
       private
 
+      def verify_package_source(state)
+        persisted = refuse_package_with_injected_key(state)
+        digest = state[:parallels_package_source_sha256]
+        provenance_keys = %i{parallels_token parallels_uuid parallels_name parallels_import parallels_package_source_sha256}
+        if digest.is_a?(String) && digest.match?(/\A[0-9a-f]{64}\z/) && state[:parallels_import] == true &&
+            persisted.values_at(*provenance_keys) == state.values_at(*provenance_keys)
+          return
+        end
+
+        raise ActionFailed, "Cannot establish Parallels package source provenance. " \
+          "Create a fresh instance from a reviewed .box archive with driver.package_source_sha256."
+      end
+
       def package_vm_info(uuid)
         details = package_vm_details(uuid)
         unless details["State"] == "stopped"
@@ -59,15 +77,30 @@ module Kitchen
       end
 
       def package_vm_details(uuid)
-        read_json(prlctl("list", uuid, "--info", "--json"), "prlctl list --info").first ||
-          raise(ActionFailed, "Parallels VM #{uuid} is no longer registered")
+        entries = read_json(prlctl("list", uuid, "--info", "--json"), "prlctl list --info")
+        if entries.is_a?(Array) && entries.one? && entries.first.is_a?(Hash)
+          details = entries.first
+          home = details["Home"]
+          return details if details["ID"] == uuid && home.is_a?(String) && home.start_with?("/") && !home.include?("\0")
+        end
+
+        raise ActionFailed, "Invalid Parallels VM details for #{uuid}"
       end
 
       def package_disks(details)
         home = File.realpath(details.fetch("Home"))
-        hardware = details.fetch("Hardware")
-        if hardware.any? { |name, device| name.match?(/\Acdrom\d+\z/) && device["state"] == "connected" }
-          raise ActionFailed, "Disconnect optical media before packaging the Parallels VM"
+        hardware = details["Hardware"]
+        unless hardware.is_a?(Hash) && hardware.values.all?(Hash)
+          raise ActionFailed, "Invalid Parallels hardware metadata"
+        end
+
+        if hardware.any? { |name, device| name.match?(/\Acdrom\d+\z/) && (device["state"] != "disconnected" || device["image"] != "") }
+          raise ActionFailed, "Remove optical media from the Parallels VM before packaging"
+        end
+
+        unless details["External boot device"] == "" && details["Restore Image"] == "" &&
+            hardware.keys.all? { |name| name.match?(/\A(?:cpu|memory|video|memory_quota|usb|(?:hdd|cdrom|net|sound)\d+)\z/) }
+          raise ActionFailed, "Cannot verify portable Parallels hardware and boot devices"
         end
 
         disks = hardware.select { |name, _| name.match?(/\Ahdd\d+\z/) }
@@ -77,7 +110,7 @@ module Kitchen
 
         disks.each_value do |disk|
           image = disk["image"]
-          unless image && File.directory?(image) && File.realpath(image).start_with?("#{home}/")
+          unless image.is_a?(String) && !image.include?("\0") && File.directory?(image) && File.realpath(image).start_with?("#{home}/")
             raise ActionFailed, "Cannot package a missing or external Parallels virtual hard disk"
           end
 
@@ -118,31 +151,72 @@ module Kitchen
           raise ActionFailed, "The Parallels package clone is missing virtual hard disks"
         end
 
-        (details.fetch("Host Shared Folders", {}).keys - ["enabled"]).each do |share|
-          prlctl("set", clone_uuid, "--shf-host-del", share)
-        end
+        scrub_package_sharing(clone_uuid, details)
       ensure
         begin
           clone_uuid ||= package_clone_uuid(source_uuid, name, bundle)
-          prlctl("unregister", clone_uuid) if clone_uuid
-        rescue ActionFailed, SystemCallError => e
+          if clone_uuid
+            prlctl("unregister", clone_uuid)
+            if package_vm_list.any? { |vm| vm["uuid"].casecmp?(clone_uuid) || vm["name"] == name }
+              raise ActionFailed, "The package clone is still registered"
+            end
+          end
+        rescue ActionFailed, SystemCallError, ArgumentError => e
           yield
           raise ActionFailed, "Could not clean up the Parallels package clone #{name}. " \
             "Staging retained at #{stage}: #{e.message}"
         end
       end
 
-      def package_clone_uuid(source_uuid, name, bundle)
-        entry = vm_list.find { |vm| vm["name"] == name }
-        return unless entry
+      def scrub_package_sharing(uuid, details)
+        shares = details["Host Shared Folders"]
+        raise ActionFailed, "Invalid Parallels host share metadata" unless shares.is_a?(Hash)
 
-        uuid = entry.fetch("uuid")
-        if uuid == source_uuid || File.symlink?(bundle) ||
-            File.realpath(package_vm_details(uuid).fetch("Home")) != File.realpath(bundle)
-          raise ActionFailed, "Could not confirm ownership of the Parallels package clone #{name}"
+        (shares.keys - ["enabled"]).each { |share| prlctl("set", uuid, "--shf-host-del", share) }
+        prlctl("set", uuid, "--shf-host", "off", "--shf-host-defined", "off", "--shf-host-automount", "off",
+          "--shared-profile", "off", "--smart-mount", "off", "--shared-cloud", "off", "--sync-ssh-ids", "off")
+
+        settings = package_vm_details(uuid)
+        unless settings["Host Shared Folders"] == { "enabled" => false } &&
+            settings["Host defined sharing"] == "Off" &&
+            ["Shared Profile", "SmartMount"].all? { |key| settings[key].is_a?(Hash) && settings[key]["enabled"] == false } &&
+            settings.dig("Miscellaneous Sharing", "Shared cloud") == "off" &&
+            settings.dig("Advanced", "Public SSH keys synchronization") == "off"
+          raise ActionFailed, "Could not verify that Parallels host sharing was disabled"
+        end
+      rescue TypeError
+        raise ActionFailed, "Invalid Parallels host share metadata"
+      end
+
+      def package_vm_list
+        entries = vm_list
+        unless entries.is_a?(Array) && entries.all? { |entry| valid_package_vm_entry?(entry) } &&
+            entries.map { |entry| entry["uuid"].downcase }.uniq.size == entries.size
+          raise ActionFailed, "Invalid Parallels VM inventory"
         end
 
-        uuid
+        entries
+      end
+
+      def valid_package_vm_entry?(entry)
+        entry.is_a?(Hash) && entry["uuid"].is_a?(String) &&
+          entry["uuid"].match?(/\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z/i) &&
+          entry["name"].is_a?(String) && !entry["name"].empty?
+      end
+
+      def package_clone_uuid(source_uuid, name, bundle)
+        entries = package_vm_list.select { |vm| vm["name"] == name }
+        return if entries.empty? && Dir.empty?(File.dirname(bundle))
+
+        if entries.one?
+          uuid = entries.first.fetch("uuid")
+          unless uuid.casecmp?(source_uuid) || File.symlink?(bundle)
+            home = package_vm_details(uuid).fetch("Home")
+            return uuid if File.realpath(home) == File.realpath(bundle)
+          end
+        end
+
+        raise ActionFailed, "Could not confirm ownership of the Parallels package clone #{name}"
       end
 
       def validate_package_bundle(bundle)

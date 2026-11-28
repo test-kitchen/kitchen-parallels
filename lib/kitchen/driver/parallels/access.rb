@@ -17,7 +17,9 @@ module Kitchen
             "Create a fresh instance with driver.insert_key disabled and supply your own SSH credentials."
         end
 
-        return if state[:parallels_key_injected] == false
+        if [state, persisted].all? { |record| record[:parallels_key_injected] == false }
+          return persisted
+        end
 
         raise ActionFailed, "Cannot establish the SSH injection history of this Parallels instance. " \
           "Create a fresh instance with driver.insert_key disabled and supply your own SSH credentials."

@@ -84,13 +84,17 @@ Shut down the guest without destroying the Kitchen instance, then run
 and leaves the source VM registered and stopped. Use the resulting file as
 `driver.box` in another instance. An existing output file is preserved.
 
-Use a fresh instance with `driver.insert_key: false` and supply your own
-transport credentials when preparing a package. Packaging refuses instances
-with evidence of Kitchen-injected SSH access because the driver cannot safely
-remove that key from a stopped guest. Instances created before the driver
-tracked SSH injection history also require recreation. Guest files and
-credentials you add yourself are retained, so prepare the guest before packaging it. Disconnect
-optical media and keep virtual hard disks inside the VM bundle.
+Create a fresh instance from a reviewed `.box` archive that contains no
+Kitchen-injected SSH keys. Set `driver.package_source_sha256` to the SHA-256
+digest of that specific archive before creating the instance, set
+`driver.insert_key: false`, and supply your own transport credentials.
+Kitchen checks the archive against the digest during import. Inspect the
+base guest for inherited credentials before approving it. Existing instances,
+registered `source_vm` clones, and direct `.pvm` imports lack this import record.
+
+The package retains guest files and credentials you add. Eject optical
+images completely and keep virtual hard disks inside the VM bundle.
+Kitchen removes custom host shares and disables host sharing on the export clone.
 
 ## Shared folders and disks
 

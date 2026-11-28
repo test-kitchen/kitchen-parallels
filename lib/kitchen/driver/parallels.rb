@@ -25,6 +25,7 @@ module Kitchen
       plugin_version "0.1.0"
 
       default_config :source_vm
+      default_config :package_source_sha256
       default_config :box
       default_config :box_manifest
       default_config :box_cache
@@ -135,10 +136,15 @@ module Kitchen
       end
 
       def import_box(state)
+        checkpoint(state) if state.delete(:parallels_package_source_sha256)
         source = box_source("parallels", state) { checkpoint(state) }
         unless File.directory?(source) && File.extname(source) == ".pvm" ||
             File.file?(source) && File.extname(source) == ".box"
           raise ActionFailed, "driver.box must point to a local Parallels .pvm bundle or .box archive: #{source}"
+        end
+
+        if config[:package_source_sha256] && File.extname(source) != ".box"
+          raise ActionFailed, "driver.package_source_sha256 requires a .box archive"
         end
 
         remove_instance_directory(state)
@@ -149,13 +155,33 @@ module Kitchen
                    command("/usr/bin/ditto", source, destination)
                    destination
                  else
-                   unpack_box(source, directory)
+                   import_archive(source, directory)
                  end
         unless File.file?(File.join(bundle, "config.pvs"))
           raise ActionFailed, "Parallels bundle is missing config.pvs: #{bundle}"
         end
 
         prlctl("register", bundle, "--uuid", state[:parallels_uuid], "--name", state[:parallels_name])
+        if config[:package_source_sha256]
+          prlctl("set", state[:parallels_uuid], "--sync-ssh-ids", "off")
+          state[:parallels_package_source_sha256] = config[:package_source_sha256]
+        end
+      end
+
+      def import_archive(source, directory)
+        expected = config[:package_source_sha256]
+        return unpack_box(source, directory) unless expected
+
+        # Extract the same private copy whose bytes were verified.
+        Dir.mktmpdir("source-", directory) do |staging|
+          archive = File.join(staging, "source.box")
+          FileUtils.cp(source, archive)
+          unless expected.is_a?(String) && Digest::SHA256.file(archive).hexdigest == expected
+            raise ActionFailed, "Parallels source archive does not match driver.package_source_sha256"
+          end
+
+          unpack_box(archive, directory)
+        end
       end
 
       def unpack_box(source, directory)
